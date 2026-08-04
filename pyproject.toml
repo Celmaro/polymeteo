@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "polymarket-weather-copy-bot"
+version = "1.0.0"
+description = "Low-latency copy trading bot for Polymarket weather prediction markets"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Weather Copy Bot Contributors" }]
+keywords = [
+  "polymarket",
+  "copy-trading",
+  "weather",
+  "prediction-market",
+  "trading-bot",
+  "backtest",
+  "paper-trading",
+]
+dependencies = [
+  "fastapi>=0.115.0",
+  "uvicorn[standard]>=0.32.0",
+  "pydantic>=2.9.0",
+  "pydantic-settings>=2.6.0",
+  "httpx>=0.27.0",
+  "numpy>=1.26.0",
+  "pandas>=2.2.0",
+  "python-dotenv>=1.0.1",
+  "orjson>=3.10.0",
+  "rich>=13.9.0",
+  "typer>=0.12.0",
+  "websockets>=13.0",
+  "aiofiles>=24.1.0",
+]
+
+[project.scripts]
+weather-copy = "weather_copy_bot.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
