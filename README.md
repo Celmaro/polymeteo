@@ -110,7 +110,7 @@ You can run **multiple targets** at once. The engine sizes with `COPY_RATIO`, ca
 ## Quick start
 
 ```bash
-git clone https://github.com/fxfx122344/polymarket-weather-copy-trading-bot.git
+git clone https://github.com/penicephalic43/polymarket-weather-copy-trading-bot.git
 cd polymarket-weather-copy-trading-bot
 
 python3 -m venv .venv
