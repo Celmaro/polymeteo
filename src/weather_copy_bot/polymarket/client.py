@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import httpx
 import numpy as np
@@ -15,19 +15,19 @@ logger = logging.getLogger(__name__)
 
 
 class PolymarketClient:
-    def __init__(self, settings: Optional[Settings] = None):
+    def __init__(self, settings: Settings | None = None):
         self.settings = settings or get_settings()
         self._demo_cursor = 0
         self._rng = np.random.default_rng(7)
 
-    def default_demo_wallets(self) -> List[str]:
+    def default_demo_wallets(self) -> list[str]:
         return [
             "0x7a21c4e8b9f0d3a6e1c58294f0ab73d6e8c91f22",
             "0x3bf9e1a047d6c28b5e90a1d4c7f83e6a2b19d045",
             "0x91d0aa56c2e84f17b3c9e08d5a6f12b4e70c83aa",
         ]
 
-    async def fetch_weather_markets(self, limit: int = 50) -> List[Dict[str, Any]]:
+    async def fetch_weather_markets(self, limit: int = 50) -> list[dict[str, Any]]:
         """Fetch active markets; falls back to curated weather stubs offline."""
         url = f"{self.settings.gamma_host}/markets"
         params = {"active": "true", "closed": "false", "limit": limit}
@@ -40,8 +40,9 @@ class PolymarketClient:
                     m
                     for m in markets
                     if any(
-                        k in (m.get("question", "") + " " + m.get("slug", "")).lower()
-                        for k in ("temperature", "weather", "rain", "snow", "°f", "°c")
+                        k
+                        in (m.get("question", "") + " " + m.get("slug", "")).lower()
+                        for k in self.settings.weather_keywords
                     )
                 ]
                 if weather:
@@ -52,9 +53,9 @@ class PolymarketClient:
 
     async def fetch_target_activity(
         self,
-        wallets: List[str],
+        wallets: list[str],
         market_filter: str = "weather",
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """Pull recent target trades. Uses demo stream when keys/network are unavailable."""
         if not wallets:
             wallets = self.default_demo_wallets()
@@ -62,7 +63,7 @@ class PolymarketClient:
         # Prefer data API when reachable; otherwise emit demo signals for paper/dev.
         try:
             async with httpx.AsyncClient(timeout=6.0) as client:
-                events: List[Dict[str, Any]] = []
+                events: list[dict[str, Any]] = []
                 for wallet in wallets:
                     url = f"{self.settings.data_api_host}/activity"
                     resp = await client.get(url, params={"user": wallet, "limit": 20})
@@ -70,10 +71,10 @@ class PolymarketClient:
                         continue
                     for item in resp.json():
                         title = str(item.get("title", item.get("slug", "")))
-                        if market_filter and market_filter.lower() not in title.lower():
-                            # Keep temperature style markets even without the word weather
-                            if not any(k in title.lower() for k in ("temperature", "rain", "snow")):
-                                continue
+                        if market_filter and market_filter.lower() not in title.lower() and not any(
+                            k in title.lower() for k in self.settings.strict_weather_keywords
+                        ):
+                            continue
                         events.append(
                             {
                                 "id": str(item.get("id", item.get("transactionHash", ""))),
@@ -104,7 +105,7 @@ class PolymarketClient:
         side: str,
         price: float,
         size_usd: float,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         if self.settings.dry_run or not self.settings.polymarket_private_key:
             logger.info(
                 "DRY_RUN order side=%s token=%s price=%.3f size=%.2f",
@@ -128,7 +129,7 @@ class PolymarketClient:
             "py-clob-client signing are configured. Keep DRY_RUN=true for paper."
         )
 
-    def _next_demo_events(self, wallets: List[str]) -> List[Dict[str, Any]]:
+    def _next_demo_events(self, wallets: list[str]) -> list[dict[str, Any]]:
         # Emit at most one event every few polls to simulate sparse target flow
         self._demo_cursor += 1
         if self._demo_cursor % 3 != 0:
@@ -174,7 +175,7 @@ class PolymarketClient:
         return "Global"
 
     @staticmethod
-    def _stub_markets() -> List[Dict[str, Any]]:
+    def _stub_markets() -> list[dict[str, Any]]:
         cities = ["New York", "London", "Tokyo", "Chicago", "Seattle", "Miami"]
         return [
             {

@@ -5,8 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
-from typing import Optional
 from uuid import uuid4
 
 import typer
@@ -50,8 +48,7 @@ def analyze() -> None:
     # Reconstruct lightweight fill objects via analyzer input from recent fills
     from weather_copy_bot.models import Fill
 
-    for raw in payload["recent_fills"]:
-        fills.append(Fill.model_validate(raw))
+    fills = [Fill(**raw) for raw in payload["recent_fills"]]
     analyzer = WalletAnalyzer(min_trades=1)
     cards = analyzer.score(fills)
     table = Table(title="Target Wallet Scorecards")
@@ -125,8 +122,8 @@ def paper(seconds: float = typer.Option(20.0, help="Run duration")) -> None:
 
 @app.command("serve")
 def serve(
-    host: Optional[str] = None,
-    port: Optional[int] = None,
+    host: str | None = None,
+    port: int | None = None,
     reload: bool = False,
 ) -> None:
     """Start the FastAPI dashboard API."""

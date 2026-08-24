@@ -2,27 +2,33 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import datetime
-from typing import Iterable, List, Optional
 
 from weather_copy_bot.config import Settings, get_settings
 from weather_copy_bot.metrics import summarize_fills
-from weather_copy_bot.models import CopyDecision, EquityPoint, Fill, PerformanceSummary, Side, TradeSignal
+from weather_copy_bot.models import (
+    CopyDecision,
+    EquityPoint,
+    Fill,
+    PerformanceSummary,
+    Side,
+    TradeSignal,
+)
 
 
 @dataclass
 class BacktestResult:
     summary: PerformanceSummary
-    fills: List[Fill]
-    equity_curve: List[EquityPoint]
-    decisions: List[CopyDecision]
+    fills: list[Fill]
+    equity_curve: list[EquityPoint]
+    decisions: list[CopyDecision]
 
 
 class CopyBacktester:
     """Replays target fills with latency, sizing, and risk filters."""
 
-    def __init__(self, settings: Optional[Settings] = None):
+    def __init__(self, settings: Settings | None = None):
         self.settings = settings or get_settings()
 
     def decide(self, signal: TradeSignal) -> CopyDecision:
@@ -57,10 +63,10 @@ class CopyBacktester:
         balance = self.settings.paper_starting_balance
         peak = balance
         daily_pnl = 0.0
-        day_key: Optional[str] = None
-        fills: List[Fill] = []
-        curve: List[EquityPoint] = []
-        decisions: List[CopyDecision] = []
+        day_key: str | None = None
+        fills: list[Fill] = []
+        curve: list[EquityPoint] = []
+        decisions: list[CopyDecision] = []
 
         for idx, signal in enumerate(sorted(signals, key=lambda s: s.detected_at)):
             dkey = signal.detected_at.strftime("%Y-%m-%d")

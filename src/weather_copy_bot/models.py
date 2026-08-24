@@ -4,9 +4,8 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
-from typing import List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class Side(str, Enum):
@@ -15,6 +14,8 @@ class Side(str, Enum):
 
 
 class TradeSignal(BaseModel):
+    model_config = ConfigDict(extra="ignore", frozen=False)
+
     signal_id: str
     target_wallet: str
     market_slug: str
@@ -27,10 +28,12 @@ class TradeSignal(BaseModel):
     detected_at: datetime
     target_filled_at: datetime
     latency_ms: int
-    token_id: Optional[str] = None
+    token_id: str | None = None
 
 
 class CopyDecision(BaseModel):
+    model_config = ConfigDict(extra="ignore", frozen=False)
+
     signal: TradeSignal
     should_copy: bool
     reason: str
@@ -39,6 +42,8 @@ class CopyDecision(BaseModel):
 
 
 class Fill(BaseModel):
+    model_config = ConfigDict(extra="ignore", frozen=False)
+
     fill_id: str
     signal_id: str
     target_wallet: str
@@ -53,10 +58,12 @@ class Fill(BaseModel):
     pnl_usd: float
     latency_ms: int
     filled_at: datetime
-    mode: str  # backtest | paper | live
+    mode: str
 
 
 class WalletScorecard(BaseModel):
+    model_config = ConfigDict(extra="ignore", frozen=False)
+
     wallet: str
     alias: str
     total_pnl_usd: float
@@ -66,12 +73,14 @@ class WalletScorecard(BaseModel):
     sharpe: float
     max_drawdown_pct: float
     profit_factor: float
-    specialty_cities: List[str] = Field(default_factory=list)
+    specialty_cities: list[str] = Field(default_factory=list)
     consistency_score: float
     copy_recommendation: str
 
 
 class EquityPoint(BaseModel):
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
     timestamp: datetime
     equity_usd: float
     pnl_usd: float
@@ -79,6 +88,8 @@ class EquityPoint(BaseModel):
 
 
 class PerformanceSummary(BaseModel):
+    model_config = ConfigDict(extra="ignore", frozen=False)
+
     mode: str
     starting_balance: float
     ending_balance: float
@@ -98,6 +109,8 @@ class PerformanceSummary(BaseModel):
 
 
 class CityBreakdown(BaseModel):
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
     city: str
     trade_count: int
     pnl_usd: float
@@ -105,6 +118,8 @@ class CityBreakdown(BaseModel):
 
 
 class LatencyBucket(BaseModel):
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
     bucket: str
     trade_count: int
     avg_pnl_usd: float
@@ -112,16 +127,18 @@ class LatencyBucket(BaseModel):
 
 
 class DashboardPayload(BaseModel):
+    model_config = ConfigDict(extra="ignore", frozen=False)
+
     generated_at: datetime
     headline: PerformanceSummary
     paper: PerformanceSummary
     backtest: PerformanceSummary
-    wallets: List[WalletScorecard]
-    equity_curve: List[EquityPoint]
-    paper_equity: List[EquityPoint]
-    backtest_equity: List[EquityPoint]
-    recent_fills: List[Fill]
-    city_breakdown: List[CityBreakdown]
-    latency_buckets: List[LatencyBucket]
+    wallets: list[WalletScorecard]
+    equity_curve: list[EquityPoint]
+    paper_equity: list[EquityPoint]
+    backtest_equity: list[EquityPoint]
+    recent_fills: list[Fill]
+    city_breakdown: list[CityBreakdown]
+    latency_buckets: list[LatencyBucket]
     copy_funnel: dict
     engine_status: dict

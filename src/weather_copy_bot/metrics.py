@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Iterable, List, Sequence
+from collections.abc import Iterable, Sequence
 
 import numpy as np
 
@@ -50,8 +50,8 @@ def profit_factor(fills: Iterable[Fill]) -> float:
 
 
 def summarize_fills(
-    fills: List[Fill],
-    equity_curve: List[EquityPoint],
+    fills: list[Fill],
+    equity_curve: list[EquityPoint],
     mode: str,
     starting_balance: float,
 ) -> PerformanceSummary:

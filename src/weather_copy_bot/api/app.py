@@ -4,13 +4,21 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any, Dict
+from functools import lru_cache
+from typing import Any
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from weather_copy_bot import __version__
+from weather_copy_bot.config import get_settings
+from weather_copy_bot.demo_data import (
+    DashboardPayload,
+    build_dashboard_payload,
+    export_demo_json,
+    load_dashboard_payload,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -27,12 +35,13 @@ app = FastAPI(
     version=__version__,
 )
 
+settings = get_settings()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.cors_origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
 )
 
 dashboard_dist = os.path.join(os.environ.get("APP_ROOT", "/app"), "dashboard", "dist")
@@ -40,8 +49,17 @@ if os.path.isdir(dashboard_dist):
     app.mount("/", StaticFiles(directory=dashboard_dist, html=True), name="dashboard")
 
 
+@lru_cache(maxsize=1)
+def _get_cached_payload() -> DashboardPayload:
+    return build_dashboard_payload()
+
+
+def _invalidate_cache() -> None:
+    _get_cached_payload.cache_clear()
+
+
 @app.get("/api/health")
-def health() -> Dict[str, Any]:
+def health() -> dict[str, Any]:
     return {
         "status": "ok",
         "version": __version__,
@@ -49,41 +67,33 @@ def health() -> Dict[str, Any]:
 
 
 @app.get("/api/dashboard")
-def dashboard() -> Dict[str, Any]:
-    from weather_copy_bot.demo_data import load_dashboard_payload
+def dashboard() -> dict[str, Any]:
     return load_dashboard_payload()
 
 
 @app.get("/api/wallets")
-def wallets() -> Dict[str, Any]:
-    from weather_copy_bot.demo_data import build_dashboard_payload
-    payload = build_dashboard_payload()
+def wallets() -> dict[str, Any]:
+    payload = _get_cached_payload()
     return {"wallets": [w.model_dump(mode="json") for w in payload.wallets]}
 
 
 @app.get("/api/backtest/summary")
-def backtest_summary() -> Dict[str, Any]:
-    from weather_copy_bot.demo_data import build_dashboard_payload
-    payload = build_dashboard_payload()
-    return payload.backtest.model_dump(mode="json")
+def backtest_summary() -> dict[str, Any]:
+    return _get_cached_payload().backtest.model_dump(mode="json")
 
 
 @app.get("/api/paper/summary")
-def paper_summary() -> Dict[str, Any]:
-    from weather_copy_bot.demo_data import build_dashboard_payload
-    payload = build_dashboard_payload()
-    return payload.paper.model_dump(mode="json")
+def paper_summary() -> dict[str, Any]:
+    return _get_cached_payload().paper.model_dump(mode="json")
 
 
 @app.get("/api/engine/status")
-def engine_status() -> Dict[str, Any]:
-    from weather_copy_bot.demo_data import build_dashboard_payload
-    payload = build_dashboard_payload()
-    return payload.engine_status
+def engine_status() -> dict[str, Any]:
+    return _get_cached_payload().engine_status
 
 
 @app.post("/api/demo/refresh")
-def refresh_demo() -> Dict[str, Any]:
-    from weather_copy_bot.demo_data import export_demo_json
+def refresh_demo() -> dict[str, Any]:
+    _invalidate_cache()
     path = export_demo_json()
     return {"ok": True, "path": str(path)}

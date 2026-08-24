@@ -13,8 +13,8 @@ import asyncio
 import logging
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
-from typing import Awaitable, Callable, List, Optional
 
 from weather_copy_bot.backtest.engine import CopyBacktester
 from weather_copy_bot.config import Settings, get_settings
@@ -30,9 +30,9 @@ SignalHandler = Callable[[TradeSignal, CopyDecision], Awaitable[None]]
 class CopyEngine:
     def __init__(
         self,
-        settings: Optional[Settings] = None,
-        client: Optional[PolymarketClient] = None,
-        on_decision: Optional[SignalHandler] = None,
+        settings: Settings | None = None,
+        client: PolymarketClient | None = None,
+        on_decision: SignalHandler | None = None,
     ):
         self.settings = settings or get_settings()
         self.client = client or PolymarketClient(self.settings)
@@ -95,14 +95,14 @@ class CopyEngine:
             size_usd=decision.copy_size_usd,
         )
 
-    async def poll_once(self) -> List[TradeSignal]:
+    async def poll_once(self) -> list[TradeSignal]:
         """Poll target activity and convert fresh fills into copy signals."""
         started = time.perf_counter()
         events = await self.client.fetch_target_activity(
             wallets=self.settings.target_wallets or self.client.default_demo_wallets(),
             market_filter=self.settings.market_filter,
         )
-        fresh: List[TradeSignal] = []
+        fresh: list[TradeSignal] = []
         now = datetime.now(timezone.utc)
         for event in events:
             key = event.get("id") or f"{event.get('wallet')}:{event.get('timestamp')}:{event.get('market')}"
@@ -137,7 +137,7 @@ class CopyEngine:
         logger.debug("poll_once processed=%s elapsed_ms=%.1f", len(fresh), elapsed_ms)
         return fresh
 
-    async def run(self, duration_sec: Optional[float] = None) -> None:
+    async def run(self, duration_sec: float | None = None) -> None:
         self._running = True
         logger.info(
             "CopyEngine starting mode=%s targets=%s max_latency=%sms",

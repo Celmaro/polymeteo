@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import Dict, Iterable, List
+from collections.abc import Iterable
 
 import numpy as np
 
@@ -16,19 +16,19 @@ class WalletAnalyzer:
     def __init__(self, min_trades: int = 20):
         self.min_trades = min_trades
 
-    def score(self, fills: Iterable[Fill]) -> List[WalletScorecard]:
-        by_wallet: Dict[str, List[Fill]] = defaultdict(list)
+    def score(self, fills: Iterable[Fill]) -> list[WalletScorecard]:
+        by_wallet: dict[str, list[Fill]] = defaultdict(list)
         for fill in fills:
             by_wallet[fill.target_wallet].append(fill)
 
-        cards: List[WalletScorecard] = []
+        cards: list[WalletScorecard] = []
         for wallet, w_fills in by_wallet.items():
             if len(w_fills) < self.min_trades:
                 continue
             cards.append(self._score_wallet(wallet, w_fills))
         return sorted(cards, key=lambda c: (c.consistency_score, c.total_pnl_usd), reverse=True)
 
-    def _score_wallet(self, wallet: str, fills: List[Fill]) -> WalletScorecard:
+    def _score_wallet(self, wallet: str, fills: list[Fill]) -> WalletScorecard:
         pnls = np.array([f.pnl_usd for f in fills], dtype=float)
         latencies = np.array([f.latency_ms for f in fills], dtype=float)
         wins = int(np.sum(pnls > 0))
@@ -42,7 +42,7 @@ class WalletAnalyzer:
         rets = np.diff(equity, prepend=0.0)
         sharpe = float(np.mean(rets) / (np.std(rets) + 1e-9) * np.sqrt(252))
 
-        city_pnl: Dict[str, float] = defaultdict(float)
+        city_pnl: dict[str, float] = defaultdict(float)
         for f in fills:
             city_pnl[f.city] += f.pnl_usd
         specialty = [c for c, _ in sorted(city_pnl.items(), key=lambda x: x[1], reverse=True)[:3]]
@@ -74,6 +74,6 @@ class WalletAnalyzer:
             copy_recommendation=recommendation,
         )
 
-    def select_targets(self, cards: List[WalletScorecard], max_targets: int = 3) -> List[WalletScorecard]:
+    def select_targets(self, cards: list[WalletScorecard], max_targets: int = 3) -> list[WalletScorecard]:
         preferred = [c for c in cards if c.copy_recommendation in {"PRIMARY", "SATELLITE"}]
         return preferred[:max_targets]

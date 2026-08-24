@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import List
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -26,7 +25,7 @@ class Settings(BaseSettings):
     gamma_host: str = "https://gamma-api.polymarket.com"
     data_api_host: str = "https://data-api.polymarket.com"
 
-    target_wallets: List[str] = Field(default_factory=list)
+    target_wallets: list[str] = Field(default_factory=list)
     copy_ratio: float = 0.25
     max_position_usd: float = 250.0
     max_daily_loss_usd: float = 500.0
@@ -40,13 +39,19 @@ class Settings(BaseSettings):
 
     api_host: str = "0.0.0.0"
     api_port: int = 8000
-    cors_origins: List[str] = Field(
+    cors_origins: list[str] = Field(
         default_factory=lambda: ["http://localhost:5173", "http://localhost:3000"]
+    )
+    weather_keywords: list[str] = Field(
+        default_factory=lambda: ["temperature", "weather", "rain", "snow", "°f", "°c"]
+    )
+    strict_weather_keywords: list[str] = Field(
+        default_factory=lambda: ["temperature", "rain", "snow"]
     )
 
     @field_validator("target_wallets", mode="before")
     @classmethod
-    def split_wallets(cls, value: object) -> List[str]:
+    def split_wallets(cls, value: object) -> list[str]:
         import json
         if value is None or value == "":
             return []
@@ -68,7 +73,7 @@ class Settings(BaseSettings):
 
     @field_validator("cors_origins", mode="before")
     @classmethod
-    def split_cors(cls, value: object) -> List[str]:
+    def split_cors(cls, value: object) -> list[str]:
         if value is None or value == "":
             return ["http://localhost:5173"]
         if isinstance(value, str):

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import List, Optional
 
 from weather_copy_bot.backtest.engine import CopyBacktester
 from weather_copy_bot.config import Settings, get_settings
@@ -16,9 +15,9 @@ from weather_copy_bot.models import CopyDecision, EquityPoint, Fill, Performance
 class PaperLedger:
     starting_balance: float
     balance: float
-    fills: List[Fill] = field(default_factory=list)
-    equity_curve: List[EquityPoint] = field(default_factory=list)
-    decisions: List[CopyDecision] = field(default_factory=list)
+    fills: list[Fill] = field(default_factory=list)
+    equity_curve: list[EquityPoint] = field(default_factory=list)
+    decisions: list[CopyDecision] = field(default_factory=list)
     peak: float = 0.0
 
     def __post_init__(self) -> None:
@@ -28,7 +27,7 @@ class PaperLedger:
 class PaperTrader:
     """Stateful paper account driven by detected target signals."""
 
-    def __init__(self, settings: Optional[Settings] = None):
+    def __init__(self, settings: Settings | None = None):
         self.settings = settings or get_settings()
         self.policy = CopyBacktester(self.settings)
         self.ledger = PaperLedger(
