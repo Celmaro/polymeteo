@@ -1,0 +1,16 @@
+{
+  "$schema": "https://raw.githubusercontent.com/zeabur/zeabur/main/docs/zeabur-json-schema.json",
+  "services": [
+    {
+      "id": "api",
+      "name": "Polymeteo API",
+      "runtime": "dockerfile",
+      "build": {
+        "dockerfile_path": "Dockerfile",
+        "context": "."
+      },
+      "port": 8000,
+      "env": []
+    }
+  ]
+}
