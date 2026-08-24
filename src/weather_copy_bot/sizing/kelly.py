@@ -1,10 +1,10 @@
-"""Kelly Criterion and position sizing calculators."""
+"""Kelly Criterion and position sizing calculators with Logit-Space support."""
 
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Tuple
 
 
 @dataclass
@@ -20,6 +20,10 @@ class KellyConfig:
     edge_buffer_bps: float = 0.0  # Add buffer to required edge
     kelly_scaling: float = 1.0  # Global Kelly multiplier (0.5 = half Kelly)
 
+    # Logit-space configuration
+    use_logit_space: bool = True  # Use logit-space for probability modeling
+    logit_clip_range: Tuple[float, float] = (0.01, 0.99)  # Clip probabilities
+
 
 @dataclass
 class SizingResult:
@@ -31,6 +35,220 @@ class SizingResult:
     edge_required: float
     expected_value: float
     reason: str
+    # Logit-space metrics
+    logit_price: Optional[float] = None
+    logit_edge: Optional[float] = None
+    logit_probability: Optional[float] = None
+
+
+@dataclass
+class LogitMetrics:
+    """Logit-space probability metrics."""
+
+    price: float
+    logit: float
+    probability: float
+    implied_probability: float
+    edge_logit: float
+    edge_probability: float
+    is_stable: bool  # True if probability is in stable range [0.1, 0.9]
+
+
+class LogitKellyCalculator:
+    """
+    Kelly Criterion calculator using logit-space probability modeling.
+    
+    Logit-space modeling provides numerical stability for:
+    - Binary prediction tokens (0 <= p <= 1)
+    - High/low probability weather bands
+    - Tail-risk scenarios
+    
+    Formulas:
+        logit(p) = ln(p / (1 - p))
+        probability = 1 / (1 + exp(-logit))
+        logit_space_kelly = (p * b - q) / b  (in logit space)
+    """
+
+    def __init__(self, config: Optional[KellyConfig] = None):
+        self.config = config or KellyConfig()
+
+    def _price_to_logit(self, price: float) -> float:
+        """
+        Convert price to logit space.
+        
+        For Polymarket binary tokens:
+        - Price directly represents implied probability
+        - logit(price) gives stable representation for edge calculation
+        """
+        # Clip to avoid log(0) or log(negative)
+        p = max(self.config.logit_clip_range[0], 
+                min(price, self.config.logit_clip_range[1]))
+        return math.log(p / (1 - p))
+
+    def _logit_to_probability(self, logit: float) -> float:
+        """Convert logit back to probability."""
+        return 1 / (1 + math.exp(-logit))
+
+    def calculate_logit_metrics(
+        self,
+        market_price: float,
+        estimated_true_prob: float,
+    ) -> LogitMetrics:
+        """
+        Calculate logit-space metrics for probability comparison.
+        
+        Args:
+            market_price: Current market price (implied probability)
+            estimated_true_prob: Estimated true probability (e.g., from oracle)
+            
+        Returns:
+            LogitMetrics with all calculations
+        """
+        logit_market = self._price_to_logit(market_price)
+        logit_true = self._price_to_logit(estimated_true_prob)
+        
+        # Edge in logit space (stable for near-boundary probabilities)
+        logit_edge = logit_true - logit_market
+        
+        # Convert back to probability space for interpretability
+        edge_probability = self._logit_to_probability(logit_market + logit_edge)
+        
+        # Stability check: probability in [0.1, 0.9] is numerically stable
+        is_stable = 0.1 <= market_price <= 0.9
+        
+        return LogitMetrics(
+            price=market_price,
+            logit=logit_market,
+            probability=market_price,
+            implied_probability=estimated_true_prob,
+            edge_logit=logit_edge,
+            edge_probability=edge_probability - market_price,
+            is_stable=is_stable,
+        )
+
+    def calculate_logit_kelly(
+        self,
+        market_price: float,
+        estimated_true_prob: float,
+        avg_win: float,
+        avg_loss: float,
+    ) -> SizingResult:
+        """
+        Calculate Kelly sizing using logit-space probability modeling.
+        
+        This method is more stable for:
+        - Low probability events (e.g., rare weather: hurricane, blizzard)
+        - High probability events (e.g., common: temperature > 0°C)
+        - Edge cases near boundaries (p -> 0 or p -> 1)
+        
+        Args:
+            market_price: Current market price
+            estimated_true_prob: Estimated true probability
+            avg_win: Average winning amount
+            avg_loss: Average losing amount
+            
+        Returns:
+            SizingResult with Kelly calculations
+        """
+        # Get logit metrics
+        metrics = self.calculate_logit_metrics(market_price, estimated_true_prob)
+        
+        # Use estimated true probability for Kelly calculation
+        # This is more robust than using win rate directly
+        p = estimated_true_prob
+        q = 1 - p
+        
+        # Calculate Kelly in probability space first
+        b = avg_win / avg_loss if avg_loss > 0 else 1.0
+        kelly_raw = (b * p - q) / b
+        
+        # Check if edge exists (true prob > market prob)
+        if metrics.edge_probability <= 0:
+            return SizingResult(
+                base_size=0.0,
+                kelly_fraction=0.0,
+                adjusted_size=0.0,
+                edge_required=0.0,
+                expected_value=0.0,
+                reason="no_edge",
+                logit_price=metrics.logit,
+                logit_edge=metrics.edge_logit,
+                logit_probability=p,
+            )
+        
+        # Apply constraints
+        kelly_scaled = kelly_raw * self.config.kelly_scaling
+        kelly_fraction = max(0, min(kelly_scaled, self.config.max_kelly_fraction))
+        
+        # Apply Half-Kelly if enabled
+        if self.config.use_half_kelly:
+            kelly_fraction = kelly_fraction / 2
+        
+        kelly_fraction = max(kelly_fraction, self.config.min_kelly_fraction)
+        
+        # Calculate expected value
+        expected_value = p * avg_win - q * avg_loss
+        
+        return SizingResult(
+            base_size=kelly_fraction * 10000,  # Assuming $10k bankroll
+            kelly_fraction=round(kelly_fraction, 4),
+            adjusted_size=round(kelly_fraction * 10000, 2),
+            edge_required=round(metrics.edge_probability, 4),
+            expected_value=round(expected_value, 2),
+            reason="logit_kelly",
+            logit_price=round(metrics.logit, 4),
+            logit_edge=round(metrics.edge_logit, 4),
+            logit_probability=round(p, 4),
+        )
+
+    def calculate_with_bankroll(
+        self,
+        market_price: float,
+        estimated_true_prob: float,
+        avg_win: float,
+        avg_loss: float,
+        bankroll: float,
+        max_position_pct: float = 0.02,  # Max 2% of bankroll per trade
+    ) -> SizingResult:
+        """
+        Calculate Kelly sizing with explicit bankroll management.
+        
+        Args:
+            market_price: Current market price
+            estimated_true_prob: Estimated true probability
+            avg_win: Average winning amount
+            avg_loss: Average losing amount
+            bankroll: Total bankroll in USD
+            max_position_pct: Maximum position as % of bankroll
+            
+        Returns:
+            SizingResult with bankroll-adjusted sizing
+        """
+        # Calculate raw Kelly
+        result = self.calculate_logit_kelly(
+            market_price, estimated_true_prob, avg_win, avg_loss
+        )
+        
+        if result.kelly_fraction == 0:
+            return result
+        
+        # Calculate max position based on bankroll
+        max_position = bankroll * max_position_pct
+        
+        # Adjust size
+        adjusted_size = min(result.kelly_fraction * bankroll, max_position)
+        
+        return SizingResult(
+            base_size=result.base_size,
+            kelly_fraction=result.kelly_fraction,
+            adjusted_size=round(adjusted_size, 2),
+            edge_required=result.edge_required,
+            expected_value=result.expected_value,
+            reason=result.reason,
+            logit_price=result.logit_price,
+            logit_edge=result.logit_edge,
+            logit_probability=result.logit_probability,
+        )
 
 
 class KellyCalculator:
@@ -43,23 +261,11 @@ class KellyCalculator:
         b = odds received on the wager (profit / loss)
         p = probability of winning
         q = probability of losing = 1 - p
-        
-    Example:
-        calc = KellyCalculator()
-        
-        result = calc.calculate(
-            win_rate=0.55,
-            avg_win=100.0,
-            avg_loss=90.0,
-            max_position=250.0,
-        )
-        
-        print(f"Kelly fraction: {result.kelly_fraction:.2%}")
-        print(f"Optimal size: ${result.adjusted_size:.2f}")
     """
 
     def __init__(self, config: Optional[KellyConfig] = None):
         self.config = config or KellyConfig()
+        self._logit_calc = LogitKellyCalculator(config)
 
     def calculate(
         self,
@@ -69,19 +275,7 @@ class KellyCalculator:
         max_position: float = 250.0,
         min_position: float = 5.0,
     ) -> SizingResult:
-        """
-        Calculate optimal position size using Kelly Criterion.
-        
-        Args:
-            win_rate: Historical win rate (0.0 to 1.0)
-            avg_win: Average profit on winning trades
-            avg_loss: Average loss on losing trades
-            max_position: Maximum position size allowed
-            min_position: Minimum position size (below this, don't trade)
-            
-        Returns:
-            SizingResult with calculated sizes and metrics
-        """
+        """Standard Kelly calculation."""
         # Validate inputs
         if win_rate <= 0 or win_rate >= 1:
             return SizingResult(
@@ -104,34 +298,21 @@ class KellyCalculator:
             )
 
         # Calculate Kelly fraction
-        b = avg_win / avg_loss  # Odds received
+        b = avg_win / avg_loss
         p = win_rate
         q = 1 - p
 
-        # Raw Kelly: f* = (bp - q) / b
         kelly_raw = (b * p - q) / b
-
-        # Apply Kelly scaling
         kelly_scaled = kelly_raw * self.config.kelly_scaling
-
-        # Apply constraints
         kelly_fraction = max(0, min(kelly_scaled, self.config.max_kelly_fraction))
         kelly_fraction = max(kelly_fraction, self.config.min_kelly_fraction)
 
-        # Apply Half-Kelly if enabled
         if self.config.use_half_kelly:
             kelly_fraction = kelly_fraction / 2
 
-        # Calculate base size
         base_size = kelly_fraction * max_position
-
-        # Apply position limits
         adjusted_size = max(min_position, min(base_size, max_position))
-
-        # Calculate expected value
         expected_value = (p * avg_win) - (q * avg_loss)
-
-        # Edge required (minimum expected edge to take the trade)
         edge_required = (q * avg_loss) / (avg_win + avg_loss)
 
         return SizingResult(
@@ -143,50 +324,33 @@ class KellyCalculator:
             reason="kelly" if kelly_fraction > 0 else "kelly_zero",
         )
 
-    def calculate_from_prices(
+    def calculate_with_logit(
         self,
-        entry_price: float,
-        exit_price: float,
-        win_probability: float,
-        max_position: float = 250.0,
+        market_price: float,
+        estimated_true_prob: float,
+        avg_win: float,
+        avg_loss: float,
+        bankroll: float = 10000.0,
     ) -> SizingResult:
         """
-        Calculate position size from price-based inputs.
+        Calculate Kelly using logit-space for better stability.
         
-        Args:
-            entry_price: Entry price (e.g., 0.55 for YES)
-            exit_price: Expected exit price
-            win_probability: Probability of winning (0.0 to 1.0)
-            max_position: Maximum position size
-            
-        Returns:
-            SizingResult
+        Use this for:
+        - Low probability events (< 10%)
+        - High probability events (> 90%)
+        - Weather tail-risks
         """
-        # Calculate P&L from prices
-        if exit_price > entry_price:
-            # Winning trade
-            avg_win = (exit_price - entry_price) * 100  # Convert to USD per share
-            avg_loss = entry_price * 100  # Loss if NO wins
-        else:
-            # Losing trade
-            avg_win = (exit_price - entry_price) * 100
-            avg_loss = entry_price * 100
-        
-        return self.calculate(
-            win_rate=win_probability,
-            avg_win=abs(avg_win),
-            avg_loss=abs(avg_loss),
-            max_position=max_position,
+        return self._logit_calc.calculate_with_bankroll(
+            market_price=market_price,
+            estimated_true_prob=estimated_true_prob,
+            avg_win=avg_win,
+            avg_loss=avg_loss,
+            bankroll=bankroll,
         )
 
 
 class DynamicKellyCalculator:
-    """
-    Dynamic Kelly calculator that adapts based on recent performance.
-    
-    Uses exponential moving average of win rate and P&L
-    to adjust Kelly fraction in real-time.
-    """
+    """Dynamic Kelly calculator with EMA-based adaptation."""
 
     def __init__(
         self,
@@ -198,8 +362,8 @@ class DynamicKellyCalculator:
         self.ema_alpha = ema_alpha
         self.config = config or KellyConfig()
         self._base_calc = KellyCalculator(config)
+        self._logit_calc = LogitKellyCalculator(config)
         
-        # EMA state
         self._ema_win_rate: Optional[float] = None
         self._ema_avg_win: Optional[float] = None
         self._ema_avg_loss: Optional[float] = None
@@ -210,12 +374,10 @@ class DynamicKellyCalculator:
         self._trade_count += 1
         
         if self._ema_win_rate is None:
-            # Initialize
             self._ema_win_rate = 1.0 if won else 0.0
             self._ema_avg_win = max(0, pnl) if won else 0.0
             self._ema_avg_loss = max(0, -pnl) if not won else 0.0
         else:
-            # Update EMA
             self._ema_win_rate = (
                 self.ema_alpha * (1.0 if won else 0.0) +
                 (1 - self.ema_alpha) * self._ema_win_rate
@@ -232,16 +394,9 @@ class DynamicKellyCalculator:
                     (1 - self.ema_alpha) * (self._ema_avg_loss or max(0, -pnl))
                 )
 
-    def calculate(
-        self,
-        max_position: float = 250.0,
-        min_position: float = 5.0,
-    ) -> SizingResult:
-        """
-        Calculate position size using dynamic EMA values.
-        """
+    def calculate(self, max_position: float = 250.0, min_position: float = 5.0) -> SizingResult:
+        """Calculate position size using dynamic EMA values."""
         if self._trade_count < 10:
-            # Not enough data, use conservative defaults
             return SizingResult(
                 base_size=min_position,
                 kelly_fraction=0.05,
@@ -271,15 +426,7 @@ class DynamicKellyCalculator:
 
 
 def kelly_fraction(win_rate: float, avg_win: float, avg_loss: float) -> float:
-    """
-    Simple Kelly fraction calculation.
-    
-    f* = (bp - q) / b
-    
-    Example:
-        >>> kelly_fraction(0.55, 100, 90)
-        0.1667
-    """
+    """Simple Kelly fraction calculation."""
     if avg_loss <= 0 or win_rate <= 0 or win_rate >= 1:
         return 0.0
     
@@ -288,6 +435,25 @@ def kelly_fraction(win_rate: float, avg_win: float, avg_loss: float) -> float:
     q = 1 - p
     
     kelly = (b * p - q) / b
-    
-    # Clamp to reasonable bounds
     return max(0, min(kelly, 0.25))
+
+
+def logit_kelly_fraction(
+    market_price: float,
+    estimated_prob: float,
+    avg_win: float,
+    avg_loss: float,
+) -> float:
+    """
+    Calculate Kelly fraction in logit space.
+    
+    More stable for near-boundary probabilities.
+    """
+    calc = LogitKellyCalculator()
+    result = calc.calculate_logit_kelly(
+        market_price=market_price,
+        estimated_true_prob=estimated_prob,
+        avg_win=avg_win,
+        avg_loss=avg_loss,
+    )
+    return result.kelly_fraction
