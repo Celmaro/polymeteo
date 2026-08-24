@@ -25,6 +25,14 @@ from weather_copy_bot.live.risk_engine import (
     LiquidityChecker,
 )
 
+from weather_copy_bot.live.emergency_shutdown import (
+    EmergencyShutdown,
+    ShutdownReason,
+    SystemState,
+    ShutdownGuard,
+    create_shutdown_guard,
+)
+
 __all__ = [
     # Wallet filter
     "WeatherWalletFilter",
@@ -45,4 +53,10 @@ __all__ = [
     "RiskCheck",
     "Position",
     "LiquidityChecker",
+    # Emergency Shutdown
+    "EmergencyShutdown",
+    "ShutdownReason",
+    "SystemState",
+    "ShutdownGuard",
+    "create_shutdown_guard",
 ]
