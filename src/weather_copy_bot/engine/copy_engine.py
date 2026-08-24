@@ -57,22 +57,21 @@ class CopyEngine:
 
     async def process_signal(self, signal: TradeSignal) -> CopyDecision:
         self.stats["signals_detected"] += 1
-        decision = self.policy.decide(signal)
-        if not decision.should_copy:
-            self.stats["skipped"] += 1
-            if self.on_decision:
-                await self.on_decision(signal, decision)
-            return decision
 
         if self.mode == "paper":
             decision = self.paper.on_signal(signal)
         else:
-            await self._execute_live(decision)
+            decision = self.policy.decide(signal)
+            if decision.should_copy:
+                await self._execute_live(decision)
 
-        self.stats["copied"] += 1
-        n = self.stats["copied"]
-        prev = self.stats["avg_latency_ms"]
-        self.stats["avg_latency_ms"] = prev + (signal.latency_ms - prev) / n
+        if not decision.should_copy:
+            self.stats["skipped"] += 1
+        else:
+            self.stats["copied"] += 1
+            n = self.stats["copied"]
+            prev = self.stats["avg_latency_ms"]
+            self.stats["avg_latency_ms"] = prev + (signal.latency_ms - prev) / n
 
         if self.on_decision:
             await self.on_decision(signal, decision)

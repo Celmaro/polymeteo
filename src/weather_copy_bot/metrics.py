@@ -97,5 +97,5 @@ def summarize_fills(
         profit_factor=round(profit_factor(fills), 2),
         best_trade_usd=round(max(pnls), 2),
         worst_trade_usd=round(min(pnls), 2),
-        avg_copy_edge_bps=round(float(np.mean([max(0.0, p) for p in pnls]) * 10), 1),
+        avg_copy_edge_bps=round(float(np.mean([max(0.0, p) for p in pnls]) * 10000), 1),
     )

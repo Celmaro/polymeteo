@@ -49,6 +49,11 @@ class Settings(BaseSettings):
         default_factory=lambda: ["temperature", "rain", "snow"]
     )
 
+    # Database
+    database_url: str = Field(
+        default="sqlite:///./polymeteo.db"
+    )
+
     @field_validator("target_wallets", mode="before")
     @classmethod
     def split_wallets(cls, value: object) -> list[str]:

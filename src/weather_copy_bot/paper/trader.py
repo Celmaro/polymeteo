@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 
 from weather_copy_bot.backtest.engine import CopyBacktester
 from weather_copy_bot.config import Settings, get_settings
 from weather_copy_bot.metrics import summarize_fills
-from weather_copy_bot.models import CopyDecision, EquityPoint, Fill, PerformanceSummary, TradeSignal
+from weather_copy_bot.models import CopyDecision, EquityPoint, Fill, PerformanceSummary, Side, TradeSignal
 
 
 @dataclass
@@ -42,7 +41,8 @@ class PaperTrader:
             return decision
 
         latency_penalty = signal.latency_ms / 1000.0 * 0.011
-        markout = 0.034 - latency_penalty
+        direction = 1.0 if signal.side == Side.BUY else -1.0
+        markout = (0.034 - latency_penalty) * direction
         pnl = decision.copy_size_usd * markout - decision.copy_size_usd * 0.002
         self.ledger.balance += pnl
         self.ledger.peak = max(self.ledger.peak, self.ledger.balance)
@@ -62,7 +62,7 @@ class PaperTrader:
             fee_usd=round(decision.copy_size_usd * 0.002, 4),
             pnl_usd=round(pnl, 4),
             latency_ms=signal.latency_ms,
-            filled_at=signal.detected_at or datetime.now(timezone.utc),
+            filled_at=signal.detected_at,
             mode="paper",
         )
         self.ledger.fills.append(fill)
