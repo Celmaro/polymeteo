@@ -4,6 +4,8 @@ WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
+    nodejs \
+    npm \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
@@ -12,8 +14,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY src/ ./src/
 COPY scripts/ ./scripts/
 COPY data/ ./data/
-COPY dashboard/build ./dashboard/build
+COPY dashboard/ ./dashboard/
 COPY .env.example .env
+
+WORKDIR /app/dashboard
+RUN npm install && npm run build
+WORKDIR /app
 
 ENV PYTHONPATH=/app
 ENV PORT=8000
