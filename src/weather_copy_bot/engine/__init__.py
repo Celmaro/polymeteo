@@ -21,6 +21,15 @@ from weather_copy_bot.engine.twap import (
     TWAPSlice,
     TWAPIntegration,
 )
+from weather_copy_bot.engine.twap_depth_aware import (
+    TWAPSlicerDepthAware,
+    LiquidityEstimator,
+    LiquidityEstimate,
+    DepthSlice,
+    DepthAwareExecution,
+    DepthAwareStatus,
+    create_depth_aware_twap,
+)
 from weather_copy_bot.engine.quorum_backtester import (
     QuorumBacktester,
     BacktestConfig,
@@ -44,11 +53,19 @@ __all__ = [
     "OrderQueue",
     "Order",
     "OrderState",
-    # TWAP
+    # TWAP v1
     "TWAPSlicer",
     "TWAPExecution",
     "TWAPSlice",
     "TWAPIntegration",
+    # TWAP Depth-Aware
+    "TWAPSlicerDepthAware",
+    "LiquidityEstimator",
+    "LiquidityEstimate",
+    "DepthSlice",
+    "DepthAwareExecution",
+    "DepthAwareStatus",
+    "create_depth_aware_twap",
     # Backtest
     "QuorumBacktester",
     "BacktestConfig",
