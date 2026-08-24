@@ -21,7 +21,7 @@ WORKDIR /app/dashboard
 RUN npm install && npm run build
 WORKDIR /app
 
-ENV PYTHONPATH=/app
+ENV PYTHONPATH=/app:/app/src
 ENV PORT=8000
 
 EXPOSE 8000
