@@ -17,15 +17,10 @@ COPY data/ ./data/
 COPY dashboard/ ./dashboard/
 COPY .env.example .env
 
-# Skip dashboard build to isolate crash cause
-# WORKDIR /app/dashboard
-# RUN npm install && npm run build
-WORKDIR /app
-
 ENV PYTHONPATH=/app:/app/src
 ENV APP_ROOT=/app
 ENV PORT=8000
 
 EXPOSE 8000
 
-CMD ["python", "-m", "uvicorn", "weather_copy_bot.api.minimal:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["python", "-m", "uvicorn", "weather_copy_bot.api.app:app", "--host", "0.0.0.0", "--port", "8000"]
