@@ -22,6 +22,7 @@ RUN npm install && npm run build
 WORKDIR /app
 
 ENV PYTHONPATH=/app:/app/src
+ENV APP_ROOT=/app
 ENV PORT=8000
 
 EXPOSE 8000

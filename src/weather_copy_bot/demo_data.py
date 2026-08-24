@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List
@@ -20,7 +21,7 @@ from weather_copy_bot.models import (
     WalletScorecard,
 )
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(os.environ.get("APP_ROOT", "/app"))
 DATA_DIR = ROOT / "data" / "demo"
 
 

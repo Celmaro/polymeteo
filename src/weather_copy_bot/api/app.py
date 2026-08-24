@@ -40,7 +40,7 @@ app.add_middleware(
 
 
 @app.on_event("startup")
-def _ensure_demo_data() -> None:
+async def _ensure_demo_data() -> None:
     logger.info("Starting Polymeteo API...")
     logger.info(f"Settings loaded - dry_run={settings.dry_run}, live_trading={settings.live_trading_enabled}")
     try:
@@ -49,6 +49,7 @@ def _ensure_demo_data() -> None:
     except Exception as e:
         logger.error(f"Error exporting demo data: {e}")
         logger.error(traceback.format_exc())
+        raise
 
 
 @app.get("/api/health")
