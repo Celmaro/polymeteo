@@ -17,8 +17,9 @@ COPY data/ ./data/
 COPY dashboard/ ./dashboard/
 COPY .env.example .env
 
-WORKDIR /app/dashboard
-RUN npm install && npm run build
+# Skip dashboard build to isolate crash cause
+# WORKDIR /app/dashboard
+# RUN npm install && npm run build
 WORKDIR /app
 
 ENV PYTHONPATH=/app:/app/src
