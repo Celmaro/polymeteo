@@ -19,8 +19,13 @@ app.add_middleware(
 
 
 @app.get("/api/health")
+def api_health() -> Dict[str, Any]:
+    return {"status": "ok", "message": "Polymeteo minimal test", "path": "api/health"}
+
+
+@app.get("/health")
 def health() -> Dict[str, Any]:
-    return {"status": "ok", "message": "Polymeteo minimal test"}
+    return {"status": "ok", "message": "Polymeteo minimal test", "path": "health"}
 
 
 @app.get("/")
