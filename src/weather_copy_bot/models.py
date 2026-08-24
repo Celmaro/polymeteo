@@ -142,3 +142,32 @@ class DashboardPayload(BaseModel):
     latency_buckets: list[LatencyBucket]
     copy_funnel: dict
     engine_status: dict
+
+
+class TickData(BaseModel):
+    """Real-time tick data from CLOB."""
+
+    model_config = ConfigDict(extra="ignore", frozen=False)
+
+    market_slug: str
+    price: float
+    volume: float = 0.0
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    best_bid: float | None = None
+    best_ask: float | None = None
+
+
+class Market(BaseModel):
+    """Polymarket market info."""
+
+    model_config = ConfigDict(extra="ignore", frozen=False)
+
+    slug: str
+    title: str
+    question: str
+    outcomes: list[str]
+    outcome_prices: dict[str, float]
+    volume: float
+    liquidity: float
+    expires_at: datetime | None = None
+    closed: bool = False
