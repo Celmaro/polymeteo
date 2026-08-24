@@ -47,9 +47,20 @@ class Settings(BaseSettings):
     @field_validator("target_wallets", mode="before")
     @classmethod
     def split_wallets(cls, value: object) -> List[str]:
+        import json
         if value is None or value == "":
             return []
         if isinstance(value, str):
+            value = value.strip()
+            if not value:
+                return []
+            if value.startswith("["):
+                try:
+                    parsed = json.loads(value)
+                    if isinstance(parsed, list):
+                        return [str(w).strip() for w in parsed if str(w).strip()]
+                except (json.JSONDecodeError, ValueError):
+                    pass
             return [w.strip() for w in value.split(",") if w.strip()]
         if isinstance(value, list):
             return [str(w).strip() for w in value if str(w).strip()]
