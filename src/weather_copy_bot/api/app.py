@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+import traceback
 from typing import Any, Dict
 
 from fastapi import FastAPI
@@ -12,6 +14,12 @@ from weather_copy_bot.config import get_settings
 from weather_copy_bot.demo_data import build_dashboard_payload, export_demo_json, load_dashboard_payload
 
 settings = get_settings()
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Polymarket Weather Copy Bot",
@@ -33,7 +41,14 @@ app.add_middleware(
 
 @app.on_event("startup")
 def _ensure_demo_data() -> None:
-    export_demo_json()
+    logger.info("Starting Polymeteo API...")
+    logger.info(f"Settings loaded - dry_run={settings.dry_run}, live_trading={settings.live_trading_enabled}")
+    try:
+        export_demo_json()
+        logger.info("Demo data exported successfully")
+    except Exception as e:
+        logger.error(f"Error exporting demo data: {e}")
+        logger.error(traceback.format_exc())
 
 
 @app.get("/api/health")
