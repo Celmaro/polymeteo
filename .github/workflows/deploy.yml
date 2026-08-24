@@ -1,0 +1,34 @@
+name: Deploy to Zeabur
+
+on:
+  push:
+    branches: [main]
+    tags:
+      - 'v*'
+
+jobs:
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy to Zeabur
+        uses: zeabur/zeabur-deploy-action@v2
+        with:
+          token: ${{ secrets.ZEABUR_TOKEN }}
+
+      - name: Health check
+        run: |
+          sleep 10
+          curl -f https://polymymeteo.zeabur.app/health || exit 1
+
+  notify:
+    name: Notify
+    needs: deploy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send notification
+        run: |
+          echo "Deployment completed successfully"
