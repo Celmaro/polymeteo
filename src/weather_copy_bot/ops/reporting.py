@@ -6,16 +6,17 @@ Generates formatted reports for performance tracking.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Any
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from enum import Enum
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
 
 class ReportPeriod(str, Enum):
     """Report time periods."""
+
     DAILY = "daily"
     WEEKLY = "weekly"
     MONTHLY = "monthly"
@@ -24,6 +25,7 @@ class ReportPeriod(str, Enum):
 @dataclass
 class TradeSummary:
     """Summary of a single trade."""
+
     trade_id: str
     timestamp: datetime
     side: str
@@ -39,50 +41,51 @@ class TradeSummary:
 @dataclass
 class DailyReport:
     """Daily trading report."""
+
     date: datetime
     starting_balance: float
     ending_balance: float
-    
+
     # Trade Stats
     total_trades: int
     winning_trades: int
     losing_trades: int
-    
+
     # P&L
     realized_pnl: float
     unrealized_pnl: float
     daily_pnl: float
-    
+
     # Trade Details
     biggest_win: float
     biggest_loss: float
     avg_trade_size: float
     avg_trade_duration_minutes: float
-    
+
     # System Stats
     quorum_hits: int
     quorum_total_signals: int
     obi_skips: int
     avg_latency_ms: float
     error_count: int
-    
+
     # Risk Stats
     peak_drawdown_pct: float
     peak_balance: float
-    
+
     @property
     def win_rate(self) -> float:
         if self.total_trades == 0:
             return 0.0
         return (self.winning_trades / self.total_trades) * 100
-    
+
     @property
     def pnl_pct(self) -> float:
         if self.starting_balance == 0:
             return 0.0
         return (self.daily_pnl / self.starting_balance) * 100
-    
-    def to_dict(self) -> Dict[str, Any]:
+
+    def to_dict(self) -> dict[str, Any]:
         return {
             "date": self.date.strftime("%Y-%m-%d"),
             "balance": {
@@ -124,61 +127,62 @@ class DailyReport:
 @dataclass
 class WeeklyReport:
     """Weekly trading report."""
+
     week_start: datetime
     week_end: datetime
-    daily_reports: List[DailyReport]
-    
+    daily_reports: list[DailyReport]
+
     @property
     def total_pnl(self) -> float:
         return sum(r.daily_pnl for r in self.daily_reports)
-    
+
     @property
     def total_trades(self) -> int:
         return sum(r.total_trades for r in self.daily_reports)
-    
+
     @property
     def total_wins(self) -> int:
         return sum(r.winning_trades for r in self.daily_reports)
-    
+
     @property
     def win_rate(self) -> float:
         if self.total_trades == 0:
             return 0.0
         return (self.total_wins / self.total_trades) * 100
-    
+
     @property
     def avg_daily_pnl(self) -> float:
         if not self.daily_reports:
             return 0.0
         return self.total_pnl / len(self.daily_reports)
-    
+
     @property
     def max_daily_gain(self) -> float:
         return max((r.daily_pnl for r in self.daily_reports), default=0.0)
-    
+
     @property
     def max_daily_loss(self) -> float:
         return min((r.daily_pnl for r in self.daily_reports), default=0.0)
-    
+
     @property
     def sharpe_ratio(self) -> float:
         """Estimated Sharpe ratio."""
         if not self.daily_reports or len(self.daily_reports) < 2:
             return 0.0
-        
+
         pnls = [r.daily_pnl for r in self.daily_reports]
         mean_pnl = sum(pnls) / len(pnls)
-        
+
         variance = sum((p - mean_pnl) ** 2 for p in pnls) / len(pnls)
-        std_dev = variance ** 0.5
-        
+        std_dev = variance**0.5
+
         if std_dev == 0:
             return 0.0
-        
+
         # Annualized Sharpe (assuming 252 trading days)
-        return (mean_pnl / std_dev) * (252 ** 0.5) if std_dev > 0 else 0.0
-    
-    def to_dict(self) -> Dict[str, Any]:
+        return (mean_pnl / std_dev) * (252**0.5) if std_dev > 0 else 0.0
+
+    def to_dict(self) -> dict[str, Any]:
         return {
             "period": {
                 "start": self.week_start.strftime("%Y-%m-%d"),
@@ -204,28 +208,28 @@ class WeeklyReport:
 @dataclass
 class MonthlyReport:
     """Monthly trading report."""
+
     month: datetime
-    weekly_reports: List[WeeklyReport]
-    
+    weekly_reports: list[WeeklyReport]
+
     @property
     def total_pnl(self) -> float:
         return sum(w.total_pnl for w in self.weekly_reports)
-    
+
     @property
     def total_trades(self) -> int:
         return sum(w.total_trades for w in self.weekly_reports)
-    
+
     @property
     def win_rate(self) -> float:
         total_wins = sum(
-            sum(d.winning_trades for d in w.daily_reports)
-            for w in self.weekly_reports
+            sum(d.winning_trades for d in w.daily_reports) for w in self.weekly_reports
         )
         if self.total_trades == 0:
             return 0.0
         return (total_wins / self.total_trades) * 100
-    
-    def to_dict(self) -> Dict[str, Any]:
+
+    def to_dict(self) -> dict[str, Any]:
         return {
             "month": self.month.strftime("%Y-%m"),
             "total_pnl": self.total_pnl,
@@ -242,9 +246,9 @@ class ReportFormatter:
     def format_daily(daily: DailyReport) -> str:
         """Format daily report for Telegram."""
         emoji = "🟢" if daily.daily_pnl >= 0 else "🔴"
-        
+
         return f"""
-📅 **Daily Report: {daily.date.strftime('%Y-%m-%d')}** {emoji}
+📅 **Daily Report: {daily.date.strftime("%Y-%m-%d")}** {emoji}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 💰 **Balance**
@@ -269,17 +273,15 @@ class ReportFormatter:
 • Errors: {daily.error_count}
 
 ⚠️ **Risk**
-• Peak Drawdown: {daily.peak_drawdown_pct*100:.2f}%
+• Peak Drawdown: {daily.peak_drawdown_pct * 100:.2f}%
 • Peak Balance: ${daily.peak_balance:,.2f}
 """
 
     @staticmethod
     def format_weekly(weekly: WeeklyReport) -> str:
         """Format weekly report for Telegram."""
-        emoji = "📈" if weekly.total_pnl >= 0 else "📉"
-        
         return f"""
-📅 **Weekly Report: {weekly.week_start.strftime('%Y-%m-%d')} to {weekly.week_end.strftime('%Y-%m-%d')}**
+📅 **Weekly Report: {weekly.week_start.strftime("%Y-%m-%d")} to {weekly.week_end.strftime("%Y-%m-%d")}**
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 💰 **Summary**
@@ -303,9 +305,9 @@ class ReportFormatter:
     def format_monthly(monthly: MonthlyReport) -> str:
         """Format monthly report."""
         emoji = "💰" if monthly.total_pnl >= 0 else "💸"
-        
+
         return f"""
-📅 **Monthly Report: {monthly.month.strftime('%B %Y')}** {emoji}
+📅 **Monthly Report: {monthly.month.strftime("%B %Y")}** {emoji}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 💰 **Total P&L: ${monthly.total_pnl:+,.2f}**
@@ -313,7 +315,7 @@ class ReportFormatter:
 📈 Win Rate: {monthly.win_rate:.1f}%
 
 📋 **Weekly Performance**
-{chr(10).join(f"  Week {i+1}: ${w.total_pnl:+,.2f}" for i, w in enumerate(monthly.weekly_reports))}
+{chr(10).join(f"  Week {i + 1}: ${w.total_pnl:+,.2f}" for i, w in enumerate(monthly.weekly_reports))}
 """
 
 
@@ -321,7 +323,7 @@ class ReportGenerator:
     """Generates reports from trading data."""
 
     def __init__(self):
-        self.daily_reports: List[DailyReport] = []
+        self.daily_reports: list[DailyReport] = []
 
     def add_daily_report(self, report: DailyReport) -> None:
         """Add a daily report."""
@@ -331,7 +333,7 @@ class ReportGenerator:
     def generate_daily(
         self,
         date: datetime,
-        trades: List[TradeSummary],
+        trades: list[TradeSummary],
         starting_balance: float,
         ending_balance: float,
         quorum_hits: int,
@@ -341,25 +343,25 @@ class ReportGenerator:
         error_count: int,
     ) -> DailyReport:
         """Generate a daily report from trade data."""
-        
+
         winning_trades = [t for t in trades if t.pnl > 0]
         losing_trades = [t for t in trades if t.pnl < 0]
-        
+
         realized_pnl = sum(t.pnl for t in trades)
         unrealized_pnl = 0.0  # Would come from open positions
-        
+
         # Calculate peak drawdown
         peak_balance = starting_balance
         max_drawdown = 0.0
         running_balance = starting_balance
-        
+
         for trade in trades:
             running_balance += trade.pnl
             if running_balance > peak_balance:
                 peak_balance = running_balance
             drawdown = (peak_balance - running_balance) / peak_balance if peak_balance > 0 else 0
             max_drawdown = max(max_drawdown, drawdown)
-        
+
         report = DailyReport(
             date=date,
             starting_balance=starting_balance,
@@ -382,71 +384,70 @@ class ReportGenerator:
             peak_drawdown_pct=max_drawdown,
             peak_balance=peak_balance,
         )
-        
+
         self.add_daily_report(report)
         return report
 
-    def generate_weekly(self, week_start: datetime) -> Optional[WeeklyReport]:
+    def generate_weekly(self, week_start: datetime) -> WeeklyReport | None:
         """Generate weekly report from daily reports."""
         week_end = week_start + timedelta(days=6)
-        
+
         weekly_daily = [
-            r for r in self.daily_reports
-            if week_start.date() <= r.date.date() <= week_end.date()
+            r for r in self.daily_reports if week_start.date() <= r.date.date() <= week_end.date()
         ]
-        
+
         if not weekly_daily:
             return None
-        
+
         return WeeklyReport(
             week_start=week_start,
             week_end=week_end,
             daily_reports=sorted(weekly_daily, key=lambda r: r.date),
         )
 
-    def generate_monthly(self, year: int, month: int) -> Optional[MonthlyReport]:
+    def generate_monthly(self, year: int, month: int) -> MonthlyReport | None:
         """Generate monthly report from weekly reports."""
-        month_start = datetime(year, month, 1)
-        
-        # Find end of month
+        month_start = datetime(year, month, 1, tzinfo=timezone.utc)
+
         if month == 12:
-            month_end = datetime(year + 1, 1, 1) - timedelta(days=1)
+            month_end = datetime(year + 1, 1, 1, tzinfo=timezone.utc) - timedelta(days=1)
         else:
-            month_end = datetime(year, month + 1, 1) - timedelta(days=1)
-        
+            month_end = datetime(year, month + 1, 1, tzinfo=timezone.utc) - timedelta(days=1)
+
         monthly_daily = [
-            r for r in self.daily_reports
-            if month_start.date() <= r.date.date() <= month_end.date()
+            r for r in self.daily_reports if month_start.date() <= r.date.date() <= month_end.date()
         ]
-        
+
         if not monthly_daily:
             return None
-        
+
         # Group into weeks
-        weeks: Dict[int, List[DailyReport]] = {}
+        weeks: dict[int, list[DailyReport]] = {}
         for report in monthly_daily:
             week_num = report.date.isocalendar()[1]
             if week_num not in weeks:
                 weeks[week_num] = []
             weeks[week_num].append(report)
-        
+
         weekly_reports = []
         for week_num in sorted(weeks.keys()):
             week_reports = weeks[week_num]
             week_start = min(r.date for r in week_reports)
             week_end = max(r.date for r in week_reports)
-            weekly_reports.append(WeeklyReport(
-                week_start=week_start,
-                week_end=week_end,
-                daily_reports=sorted(week_reports, key=lambda r: r.date),
-            ))
-        
+            weekly_reports.append(
+                WeeklyReport(
+                    week_start=week_start,
+                    week_end=week_end,
+                    daily_reports=sorted(week_reports, key=lambda r: r.date),
+                )
+            )
+
         return MonthlyReport(
             month=month_start,
             weekly_reports=weekly_reports,
         )
 
-    def get_recent_daily(self, days: int = 7) -> List[DailyReport]:
+    def get_recent_daily(self, days: int = 7) -> list[DailyReport]:
         """Get recent daily reports."""
-        cutoff = datetime.now() - timedelta(days=days)
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
         return [r for r in self.daily_reports if r.date >= cutoff]

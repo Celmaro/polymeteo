@@ -1,23 +1,23 @@
 """Position sizing components."""
 
 from weather_copy_bot.sizing.kelly import (
-    KellyCalculator,
     DynamicKellyCalculator,
-    LogitKellyCalculator,
+    KellyCalculator,
     KellyConfig,
-    SizingResult,
+    LogitKellyCalculator,
     LogitMetrics,
+    SizingResult,
     kelly_fraction,
     logit_kelly_fraction,
 )
 
 __all__ = [
-    "KellyCalculator",
     "DynamicKellyCalculator",
-    "LogitKellyCalculator",
+    "KellyCalculator",
     "KellyConfig",
-    "SizingResult",
+    "LogitKellyCalculator",
     "LogitMetrics",
+    "SizingResult",
     "kelly_fraction",
     "logit_kelly_fraction",
 ]

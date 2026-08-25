@@ -49,10 +49,7 @@ class TestStubMarkets:
         markets = PolymarketClient._stub_markets()
         for market in markets:
             text = (market["question"] + " " + market["slug"]).lower()
-            assert any(
-                k in text
-                for k in ("temperature", "weather", "rain", "snow", "°f", "°c")
-            )
+            assert any(k in text for k in ("temperature", "weather", "rain", "snow", "°f", "°c"))
 
 
 class TestWeatherMarketFiltering:
@@ -60,11 +57,15 @@ class TestWeatherMarketFiltering:
 
     def test_temperature_keyword_match(self):
         markets = [
-            {"question": "Highest temperature in New York?", "slug": "highest-temperature-in-new-york"},
+            {
+                "question": "Highest temperature in New York?",
+                "slug": "highest-temperature-in-new-york",
+            },
             {"question": "Who wins the election?", "slug": "presidential-election-2024"},
         ]
         weather = [
-            m for m in markets
+            m
+            for m in markets
             if any(
                 k in (m.get("question", "") + " " + m.get("slug", "")).lower()
                 for k in ("temperature", "weather", "rain", "snow", "°f", "°c")
@@ -79,7 +80,8 @@ class TestWeatherMarketFiltering:
             {"question": "Stock market up 5%?", "slug": "stock-market-gains"},
         ]
         weather = [
-            m for m in markets
+            m
+            for m in markets
             if any(
                 k in (m.get("question", "") + " " + m.get("slug", "")).lower()
                 for k in ("temperature", "weather", "rain", "snow", "°f", "°c")
@@ -94,7 +96,8 @@ class TestWeatherMarketFiltering:
             {"question": "Sports championship winner?", "slug": "championship-winner"},
         ]
         weather = [
-            m for m in markets
+            m
+            for m in markets
             if any(
                 k in (m.get("question", "") + " " + m.get("slug", "")).lower()
                 for k in ("temperature", "weather", "rain", "snow", "°f", "°c")
@@ -158,6 +161,7 @@ class TestClientInitialization:
 
     def test_client_respects_custom_settings(self):
         from weather_copy_bot.config import Settings
+
         settings = Settings(target_wallets=["0xcustom"])
         client = PolymarketClient(settings=settings)
         assert client.settings.target_wallets == ["0xcustom"]

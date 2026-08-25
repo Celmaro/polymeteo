@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Generator
 from contextlib import contextmanager
-from typing import Generator, Optional
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
@@ -15,7 +15,7 @@ from weather_copy_bot.db.models import Base
 class DatabaseManager:
     """Manages database connections and sessions."""
 
-    def __init__(self, database_url: Optional[str] = None):
+    def __init__(self, database_url: str | None = None):
         self.database_url = database_url or get_settings().database_url
         self._engine = None
         self._session_factory = None
@@ -69,7 +69,7 @@ class DatabaseManager:
 
 
 # Global instance
-_db_manager: Optional[DatabaseManager] = None
+_db_manager: DatabaseManager | None = None
 
 
 def get_db_manager() -> DatabaseManager:
@@ -80,7 +80,7 @@ def get_db_manager() -> DatabaseManager:
     return _db_manager
 
 
-def init_db(database_url: Optional[str] = None) -> DatabaseManager:
+def init_db(database_url: str | None = None) -> DatabaseManager:
     """Initialize database with URL and create tables."""
     global _db_manager
     _db_manager = DatabaseManager(database_url)

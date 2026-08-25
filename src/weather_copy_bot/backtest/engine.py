@@ -3,11 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Optional
-
-from sqlalchemy.orm import Session
+from dataclasses import dataclass
 
 from weather_copy_bot.config import Settings, get_settings
 from weather_copy_bot.db import (
@@ -19,16 +15,14 @@ from weather_copy_bot.db import (
     StrategyRunRepository,
 )
 from weather_copy_bot.db.models import Decision as DBDecision
-from weather_copy_bot.db.models import Fill as DBFill
-from weather_copy_bot.db.models import Side as DBSide
 from weather_copy_bot.db.models import Signal as DBSignal
 from weather_copy_bot.db.models import Strategy as DBStrategy
-from weather_copy_bot.db.models import StrategyRun as DBStrategyRun
 from weather_copy_bot.models import (
     BacktestResult,
     CopyDecision,
     EquityPoint,
     Fill,
+    PerformanceSummary,
     Side,
     TradeSignal,
 )
@@ -48,7 +42,7 @@ class StrategyParams:
     fee_rate: float = 0.002
 
     @classmethod
-    def from_db_strategy(cls, strategy: DBStrategy) -> "StrategyParams":
+    def from_db_strategy(cls, strategy: DBStrategy) -> StrategyParams:
         """Create from database strategy."""
         return cls(
             copy_ratio=strategy.copy_ratio,
@@ -79,9 +73,9 @@ class CopyBacktester:
 
     def __init__(
         self,
-        settings: Optional[Settings] = None,
-        db_manager: Optional[DatabaseManager] = None,
-        strategy_id: Optional[int] = None,
+        settings: Settings | None = None,
+        db_manager: DatabaseManager | None = None,
+        strategy_id: int | None = None,
     ):
         self.settings = settings or get_settings()
         self.db = db_manager
@@ -91,7 +85,7 @@ class CopyBacktester:
         self._balance = self.settings.paper_starting_balance
         self._peak = self._balance
         self._daily_pnl = 0.0
-        self._day_key: Optional[str] = None
+        self._day_key: str | None = None
         self._fills: list[Fill] = []
         self._curve: list[EquityPoint] = []
         self._decisions: list[CopyDecision] = []
@@ -133,16 +127,12 @@ class CopyBacktester:
             p.max_position_usd,
         )
         if size < 5:
-            return CopyDecision(
-                signal=signal, should_copy=False, reason="size_too_small"
-            )
+            return CopyDecision(signal=signal, should_copy=False, reason="size_too_small")
 
         # Edge calculation
         edge_bps = abs(0.5 - signal.price) * 10_000 * 0.15
         if edge_bps < p.min_edge_bps and signal.price > 0.85:
-            return CopyDecision(
-                signal=signal, should_copy=False, reason="thin_edge"
-            )
+            return CopyDecision(signal=signal, should_copy=False, reason="thin_edge")
 
         # Slippage estimate
         slippage = max(4.0, signal.latency_ms * 0.02)
@@ -171,8 +161,8 @@ class CopyBacktester:
         self,
         signals: Iterable[TradeSignal],
         mode: str = "backtest",
-        strategy_id: Optional[int] = None,
-        run_id: Optional[int] = None,
+        strategy_id: int | None = None,
+        run_id: int | None = None,
         save_to_db: bool = True,
     ) -> BacktestResult:
         """Run backtest on a set of signals."""
@@ -202,7 +192,7 @@ class CopyBacktester:
                 continue
 
             # Calculate P&L
-            markout, fee, pnl = self._calculate_markout(signal, decision.copy_size_usd, params)
+            _markout, fee, pnl = self._calculate_markout(signal, decision.copy_size_usd, params)
 
             # Update state
             self._balance += pnl
@@ -253,7 +243,7 @@ class CopyBacktester:
         self,
         signals: Iterable[TradeSignal],
         strategy_id: int,
-        market_filter: Optional[str] = None,
+        market_filter: str | None = None,
     ) -> ReplayResult:
         """Full replay with database persistence."""
         if not self.db:
@@ -337,7 +327,7 @@ class CopyBacktester:
                 dd = ((self._balance - self._peak) / self._peak) * 100.0 if self._peak else 0.0
 
                 # Create fill in DB
-                db_fill = fill_repo.create(
+                _db_fill = fill_repo.create(
                     decision_id=db_decision.id,
                     fill_id=f"bt-{idx:05d}",
                     side=signal.side.value,
@@ -386,11 +376,9 @@ class CopyBacktester:
                 ending_balance=self._balance,
                 total_pnl=self._balance - self.settings.paper_starting_balance,
                 trade_count=len(fills),
-                **{
-                    "win_rate": summary.win_rate,
-                    "sharpe": summary.sharpe,
-                    "max_drawdown_pct": summary.max_drawdown_pct,
-                },
+                win_rate=summary.win_rate,
+                sharpe=summary.sharpe,
+                max_drawdown_pct=summary.max_drawdown_pct,
             )
 
             session.commit()
@@ -423,8 +411,8 @@ class CopyBacktester:
         signal: TradeSignal,
         decision: CopyDecision,
         fill: Fill,
-        strategy_id: Optional[int],
-        run_id: Optional[int],
+        strategy_id: int | None,
+        run_id: int | None,
     ) -> None:
         """Save decision and fill to database."""
         if not self.db:
@@ -483,7 +471,7 @@ class CopyBacktester:
 
     def _summarize(
         self, fills: list[Fill], curve: list[EquityPoint], mode: str
-    ) -> "PerformanceSummary":
+    ) -> PerformanceSummary:
         """Generate performance summary."""
         from weather_copy_bot.metrics import summarize_fills
 
@@ -512,7 +500,7 @@ class StrategyComparator:
         for strategy_id in strategy_ids:
             with self.db.session() as session:
                 decision_repo = DecisionRepository(session)
-                fill_repo = FillRepository(session)
+                _fill_repo = FillRepository(session)
 
                 # Get decisions for this strategy
                 decisions = []
@@ -521,9 +509,7 @@ class StrategyComparator:
                 for sid in signal_ids:
                     signal_query = session.query(DBSignal).filter_by(signal_id=sid).first()
                     if signal_query:
-                        dec = decision_repo.get_by_signal_and_strategy(
-                            signal_query.id, strategy_id
-                        )
+                        dec = decision_repo.get_by_signal_and_strategy(signal_query.id, strategy_id)
                         if dec:
                             decisions.append(dec)
                             if dec.fill:
@@ -557,21 +543,19 @@ class StrategyComparator:
     ) -> dict:
         """Calculate regret: what would the candidate have done vs baseline?"""
         with self.db.session() as session:
-            decision_repo = DecisionRepository(session)
-
             # Get all signals in run
             signals_query = session.query(DBSignal).filter_by(run_id=run_id).all()
 
             baseline_decisions = {
-                d.signal_id: d for d in
-                session.query(DBDecision)
+                d.signal_id: d
+                for d in session.query(DBDecision)
                 .filter_by(strategy_id=baseline_strategy_id, run_id=run_id)
                 .all()
             }
 
             candidate_decisions = {
-                d.signal_id: d for d in
-                session.query(DBDecision)
+                d.signal_id: d
+                for d in session.query(DBDecision)
                 .filter_by(strategy_id=candidate_strategy_id, run_id=run_id)
                 .all()
             }
@@ -607,4 +591,3 @@ class StrategyComparator:
 
 
 # For type hint in summarize
-from weather_copy_bot.models import PerformanceSummary

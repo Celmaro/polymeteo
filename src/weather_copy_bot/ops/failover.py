@@ -8,10 +8,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from dataclasses import dataclass, field
-from enum import Enum
-from typing import TYPE_CHECKING, Optional, List, Dict, Any, Callable, Awaitable
+from contextlib import suppress
 from dataclasses import dataclass
+from enum import Enum
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     pass
@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 class ServiceType(str, Enum):
     """Types of services with failover support."""
+
     POLYMARKET_API = "polymarket_api"
     POLYGON_RPC = "polygon_rpc"
     WEBSOCKET = "websocket"
@@ -31,6 +32,7 @@ class ServiceType(str, Enum):
 @dataclass
 class EndpointConfig:
     """Configuration for a single endpoint."""
+
     url: str
     name: str
     priority: int = 1
@@ -42,6 +44,7 @@ class EndpointConfig:
 @dataclass
 class HealthStatus:
     """Health status of an endpoint."""
+
     endpoint: str
     is_healthy: bool = True
     last_check: float = 0
@@ -53,7 +56,7 @@ class HealthStatus:
 class FailoverManager:
     """
     Manages failover for critical services.
-    
+
     Features:
     - Multiple endpoint support with priorities
     - Automatic failover on failure
@@ -71,7 +74,7 @@ class FailoverManager:
     ):
         """
         Initialize Failover Manager.
-        
+
         Args:
             health_check_interval_seconds: How often to check endpoint health
             max_consecutive_failures: Failures before marking endpoint unhealthy
@@ -82,29 +85,29 @@ class FailoverManager:
         self.max_failures = max_consecutive_failures
         self.failure_cooldown = failure_cooldown_seconds
         self.circuit_threshold = circuit_breaker_threshold
-        
+
         # Endpoint configurations by service type
-        self._endpoints: Dict[ServiceType, List[EndpointConfig]] = {
+        self._endpoints: dict[ServiceType, list[EndpointConfig]] = {
             ServiceType.POLYMARKET_API: [],
             ServiceType.POLYGON_RPC: [],
             ServiceType.WEBSOCKET: [],
             ServiceType.DATABASE: [],
             ServiceType.REDIS: [],
         }
-        
+
         # Health status per endpoint
-        self._health: Dict[str, HealthStatus] = {}
-        
+        self._health: dict[str, HealthStatus] = {}
+
         # Active endpoints (current choice)
-        self._active_endpoints: Dict[ServiceType, str] = {}
-        
+        self._active_endpoints: dict[ServiceType, str] = {}
+
         # State
         self._running = False
-        self._health_check_task: Optional[asyncio.Task] = None
-        
+        self._health_check_task: asyncio.Task | None = None
+
         # Lock for thread safety
         self._lock = asyncio.Lock()
-        
+
         logger.info("[FAILOVER] Manager initialized")
 
     def register_endpoint(
@@ -119,7 +122,7 @@ class FailoverManager:
     ) -> None:
         """
         Register an endpoint for a service.
-        
+
         Args:
             service: Type of service
             url: Endpoint URL
@@ -137,35 +140,32 @@ class FailoverManager:
             is_backup=is_backup,
             weight=weight,
         )
-        
+
         self._endpoints[service].append(config)
         self._health[name] = HealthStatus(endpoint=name)
-        
+
         # Set active endpoint if first
         if service not in self._active_endpoints:
             self._active_endpoints[service] = name
-        
+
         logger.info(
             f"[FAILOVER] Registered {service.value} endpoint: "
             f"{name} ({'backup' if is_backup else 'primary'})"
         )
 
-    def get_endpoint(self, service: ServiceType) -> Optional[EndpointConfig]:
+    def get_endpoint(self, service: ServiceType) -> EndpointConfig | None:
         """
         Get the active endpoint for a service.
-        
+
         Returns the highest priority healthy endpoint.
         """
-        endpoints = sorted(
-            self._endpoints.get(service, []),
-            key=lambda x: (x.priority, -x.weight)
-        )
-        
+        endpoints = sorted(self._endpoints.get(service, []), key=lambda x: (x.priority, -x.weight))
+
         for endpoint in endpoints:
             health = self._health.get(endpoint.name)
             if health and health.is_healthy and not health.is_tripped:
                 return endpoint
-        
+
         # No healthy endpoint, return lowest priority
         return endpoints[-1] if endpoints else None
 
@@ -174,22 +174,22 @@ class FailoverManager:
         endpoint_name = self._active_endpoints.get(service)
         if not endpoint_name:
             return
-        
+
         health = self._health.get(endpoint_name)
         if not health:
             return
-        
+
         # Update metrics
         health.consecutive_failures = 0
         health.is_healthy = True
         health.last_check = time.time()
-        
+
         # Update latency (exponential moving average)
         if health.avg_latency_ms == 0:
             health.avg_latency_ms = latency_ms
         else:
             health.avg_latency_ms = health.avg_latency_ms * 0.7 + latency_ms * 0.3
-        
+
         # Reset circuit breaker if recovering
         if health.is_tripped:
             health.is_tripped = False
@@ -199,106 +199,99 @@ class FailoverManager:
         self,
         service: ServiceType,
         error: str,
-        latency_ms: Optional[float] = None,
+        latency_ms: float | None = None,
     ) -> bool:
         """
         Record failed request.
-        
+
         Returns True if failover to backup occurred.
         """
         endpoint_name = self._active_endpoints.get(service)
         if not endpoint_name:
             return False
-        
+
         health = self._health.get(endpoint_name)
         if not health:
             return False
-        
+
         health.consecutive_failures += 1
         health.last_check = time.time()
-        
+
         logger.warning(
             f"[FAILOVER] {endpoint_name} failure {health.consecutive_failures}/"
             f"{self.max_failures}: {error}"
         )
-        
+
         # Check if should failover
         should_failover = False
-        
+
         if health.consecutive_failures >= self.max_failures:
             health.is_healthy = False
             should_failover = True
             logger.warning(f"[FAILOVER] {endpoint_name} marked unhealthy")
-        
+
         # Check circuit breaker
         if health.consecutive_failures >= self.circuit_threshold:
             health.is_tripped = True
             should_failover = True
             logger.critical(f"[FAILOVER] {endpoint_name} circuit breaker TRIPPED")
-        
+
         if should_failover:
             return await self._failover(service)
-        
+
         return False
 
     async def _failover(self, service: ServiceType) -> bool:
         """Perform failover to next available endpoint."""
         async with self._lock:
             endpoints = sorted(
-                self._endpoints.get(service, []),
-                key=lambda x: (x.priority, -x.weight)
+                self._endpoints.get(service, []), key=lambda x: (x.priority, -x.weight)
             )
-            
+
             current = self._active_endpoints.get(service)
-            
+
             for endpoint in endpoints:
                 if endpoint.name == current:
                     continue
-                
+
                 health = self._health.get(endpoint.name)
                 if health and (health.is_healthy or not health.is_tripped):
                     old = current
                     self._active_endpoints[service] = endpoint.name
-                    
-                    logger.warning(
-                        f"[FAILOVER] {service.value} failover: "
-                        f"{old} -> {endpoint.name}"
-                    )
+
+                    logger.warning(f"[FAILOVER] {service.value} failover: {old} -> {endpoint.name}")
                     return True
-            
+
             logger.error(f"[FAILOVER] No healthy endpoint for {service.value}")
             return False
 
-    async def health_check(self, service: ServiceType) -> Dict[str, Any]:
+    async def health_check(self, service: ServiceType) -> dict[str, Any]:
         """
         Perform health check on all endpoints for a service.
-        
+
         This should be called periodically by the health check loop.
         """
         results = {}
-        
+
         for endpoint in self._endpoints.get(service, []):
             health = self._health.get(endpoint.name)
             if not health:
                 continue
-            
+
             # Skip if in cooldown
             if not health.is_healthy:
-                cooldown_remaining = (
-                    self.failure_cooldown - 
-                    (time.time() - health.last_check)
-                )
+                cooldown_remaining = self.failure_cooldown - (time.time() - health.last_check)
                 if cooldown_remaining > 0:
                     results[endpoint.name] = {
                         "status": "cooldown",
                         "cooldown_remaining": cooldown_remaining,
                     }
                     continue
-            
+
             # Perform health check (ping)
             try:
                 is_healthy = await self._ping_endpoint(service, endpoint)
-                
+
                 if is_healthy:
                     health.is_healthy = True
                     health.consecutive_failures = 0
@@ -306,17 +299,17 @@ class FailoverManager:
                     health.consecutive_failures += 1
                     if health.consecutive_failures >= self.max_failures:
                         health.is_healthy = False
-                
+
                 results[endpoint.name] = {
                     "status": "healthy" if is_healthy else "unhealthy",
                     "latency_ms": health.avg_latency_ms,
                     "failures": health.consecutive_failures,
                 }
-                
+
             except Exception as e:
                 logger.error(f"[FAILOVER] Health check failed for {endpoint.name}: {e}")
                 results[endpoint.name] = {"status": "error", "error": str(e)}
-        
+
         return results
 
     async def _ping_endpoint(
@@ -338,7 +331,7 @@ class FailoverManager:
         """Start periodic health checks."""
         if self._running:
             return
-        
+
         self._running = True
         self._health_check_task = asyncio.create_task(self._health_check_loop())
         logger.info("[FAILOVER] Health check loop started")
@@ -348,42 +341,34 @@ class FailoverManager:
         self._running = False
         if self._health_check_task:
             self._health_check_task.cancel()
-            try:
+            with suppress(asyncio.CancelledError):
                 await self._health_check_task
-            except asyncio.CancelledError:
-                pass
         logger.info("[FAILOVER] Health check loop stopped")
 
     async def _health_check_loop(self) -> None:
         """Periodic health check loop."""
         while self._running:
-            try:
-                for service in ServiceType:
-                    await self.health_check(service)
-                await asyncio.sleep(self.health_check_interval)
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"[FAILOVER] Health check loop error: {e}")
-                await asyncio.sleep(5)
+            for service in ServiceType:
+                await self.health_check(service)
+            await asyncio.sleep(self.health_check_interval)
 
-    def get_status(self) -> Dict[str, Any]:
+    def get_status(self) -> dict[str, Any]:
         """Get status of all services and endpoints."""
         status = {
             "running": self._running,
             "services": {},
         }
-        
+
         for service in ServiceType:
             endpoints = self._endpoints.get(service, [])
             if not endpoints:
                 continue
-            
+
             service_status = {
                 "active": self._active_endpoints.get(service),
                 "endpoints": {},
             }
-            
+
             for endpoint in endpoints:
                 health = self._health.get(endpoint.name)
                 service_status["endpoints"][endpoint.name] = {
@@ -395,9 +380,9 @@ class FailoverManager:
                     "avg_latency_ms": round(health.avg_latency_ms, 2) if health else None,
                     "consecutive_failures": health.consecutive_failures if health else 0,
                 }
-            
+
             status["services"][service.value] = service_status
-        
+
         return status
 
 
@@ -445,7 +430,7 @@ DEFAULT_POLYMARKET_ENDPOINTS = [
 def create_default_failover_manager() -> FailoverManager:
     """Create a failover manager with default Polygon RPC endpoints."""
     manager = FailoverManager()
-    
+
     # Register Polygon RPC endpoints
     for endpoint in DEFAULT_POLYGON_RPC_ENDPOINTS:
         manager.register_endpoint(
@@ -456,7 +441,7 @@ def create_default_failover_manager() -> FailoverManager:
             timeout_ms=endpoint.timeout_ms,
             is_backup=endpoint.is_backup,
         )
-    
+
     # Register Polymarket CLOB endpoint
     for endpoint in DEFAULT_POLYMARKET_ENDPOINTS:
         manager.register_endpoint(
@@ -466,5 +451,5 @@ def create_default_failover_manager() -> FailoverManager:
             priority=endpoint.priority,
             timeout_ms=endpoint.timeout_ms,
         )
-    
+
     return manager

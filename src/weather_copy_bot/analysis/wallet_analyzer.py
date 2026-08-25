@@ -54,9 +54,11 @@ class WalletAnalyzer:
             win_rate * 0.55 + min(pf, 3.0) * 8.0 + latency_bonus + (5.0 if dd < 10 else 0.0),
         )
         recommendation = (
-            "PRIMARY" if consistency >= 85 and win_rate >= 60 else
-            "SATELLITE" if consistency >= 70 else
-            "WATCHLIST"
+            "PRIMARY"
+            if consistency >= 85 and win_rate >= 60
+            else "SATELLITE"
+            if consistency >= 70
+            else "WATCHLIST"
         )
 
         return WalletScorecard(
@@ -74,6 +76,8 @@ class WalletAnalyzer:
             copy_recommendation=recommendation,
         )
 
-    def select_targets(self, cards: list[WalletScorecard], max_targets: int = 3) -> list[WalletScorecard]:
+    def select_targets(
+        self, cards: list[WalletScorecard], max_targets: int = 3
+    ) -> list[WalletScorecard]:
         preferred = [c for c in cards if c.copy_recommendation in {"PRIMARY", "SATELLITE"}]
         return preferred[:max_targets]

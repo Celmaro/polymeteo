@@ -4,8 +4,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from weather_copy_bot.db import init_db, get_db_manager
-from weather_copy_bot.db.models import Strategy
+from weather_copy_bot.db import get_db_manager, init_db
 from weather_copy_bot.db.repositories import StrategyRepository
 
 app = typer.Typer(help="Database management commands")
@@ -23,7 +22,7 @@ def init(
 
     db = init_db(database_url) if database_url else init_db()
 
-    console.print(f"[green]Database initialized successfully![/green]")
+    console.print("[green]Database initialized successfully![/green]")
     console.print(f"Database URL: {db.database_url}")
 
 
@@ -54,7 +53,7 @@ def create_strategy(
         elif version is None:
             version = 1
 
-        strategy = repo.create(
+        _strategy = repo.create(
             name=name,
             version=version,
             description=description,
@@ -111,12 +110,14 @@ def list_strategies() -> None:
 
 @app.command()
 def compare_strategies(
-    strategy_ids: str = typer.Option(..., "--strategy-ids", "-s", help="Comma-separated strategy IDs"),
+    strategy_ids: str = typer.Option(
+        ..., "--strategy-ids", "-s", help="Comma-separated strategy IDs"
+    ),
 ) -> None:
     """Compare multiple strategies by their runs."""
     db = get_db_manager()
 
-    from weather_copy_bot.db.repositories import StrategyRunRepository, FillRepository
+    from weather_copy_bot.db.repositories import FillRepository, StrategyRunRepository
 
     ids = [int(x.strip()) for x in strategy_ids.split(",")]
 

@@ -8,9 +8,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from dataclasses import dataclass, field
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Optional, List, Dict, Any, Callable, Awaitable
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from weather_copy_bot.live.order_queue import OrderQueue
@@ -22,6 +23,7 @@ logger = logging.getLogger(__name__)
 
 class ShutdownReason(str, Enum):
     """Reasons for emergency shutdown."""
+
     MANUAL = "manual"
     CIRCUIT_BREAKER = "circuit_breaker"
     DAILY_LOSS_LIMIT = "daily_loss_limit"
@@ -35,6 +37,7 @@ class ShutdownReason(str, Enum):
 
 class SystemState(str, Enum):
     """Current system operational state."""
+
     RUNNING = "running"
     SHUTTING_DOWN = "shutting_down"
     SHUTDOWN = "shutdown"
@@ -44,6 +47,7 @@ class SystemState(str, Enum):
 @dataclass
 class ShutdownEvent:
     """Record of a shutdown event."""
+
     reason: ShutdownReason
     timestamp: float
     details: str
@@ -56,22 +60,23 @@ class ShutdownEvent:
 @dataclass
 class CircuitBreakerState:
     """State of circuit breaker monitoring."""
+
     consecutive_failures: int = 0
-    last_failure_time: Optional[float] = None
+    last_failure_time: float | None = None
     is_tripped: bool = False
-    trip_reason: Optional[str] = None
+    trip_reason: str | None = None
 
 
 class EmergencyShutdown:
     """
     Emergency shutdown system for live trading.
-    
+
     Features:
     - Manual shutdown via Telegram or code
     - Automated circuit breakers (daily loss, drawdown)
     - Connectivity failure detection
     - Graceful position/orders cleanup
-    
+
     Trigger conditions:
     - Daily loss limit reached
     - Circuit breaker triggered
@@ -89,7 +94,7 @@ class EmergencyShutdown:
     ):
         """
         Initialize Emergency Shutdown.
-        
+
         Args:
             max_daily_loss_usd: Maximum daily loss before shutdown
             max_drawdown_pct: Maximum drawdown percentage before shutdown
@@ -100,28 +105,28 @@ class EmergencyShutdown:
         self.max_drawdown = max_drawdown_pct
         self.max_failures = max_consecutive_failures
         self.failure_timeout = failure_timeout_seconds
-        
+
         # Dependencies (set via set_dependencies)
-        self._order_queue: Optional[OrderQueue] = None
-        self._executor: Optional[CLOBExecutor] = None
-        self._notifier: Optional[NotificationHandler] = None
-        self._get_balance_fn: Optional[Callable[[], Awaitable[float]]] = None
-        self._get_positions_fn: Optional[Callable[[], Awaitable[List[Dict]]]] = None
-        
+        self._order_queue: OrderQueue | None = None
+        self._executor: CLOBExecutor | None = None
+        self._notifier: NotificationHandler | None = None
+        self._get_balance_fn: Callable[[], Awaitable[float]] | None = None
+        self._get_positions_fn: Callable[[], Awaitable[list[dict]]] | None = None
+
         # State
         self._state = SystemState.RUNNING
-        self._shutdown_log: List[ShutdownEvent] = []
+        self._shutdown_log: list[ShutdownEvent] = []
         self._circuit_breaker = CircuitBreakerState()
         self._daily_loss = 0.0
         self._peak_balance = 0.0
-        
+
         # Locks
         self._shutdown_lock = asyncio.Lock()
-        
+
         logger.info(
             f"[SHUTDOWN] Emergency shutdown initialized: "
             f"max_daily_loss=${self.max_daily_loss}, "
-            f"max_drawdown={self.max_drawdown*100}%"
+            f"max_drawdown={self.max_drawdown * 100}%"
         )
 
     def set_dependencies(
@@ -130,7 +135,7 @@ class EmergencyShutdown:
         executor: CLOBExecutor,
         notifier: NotificationHandler,
         get_balance_fn: Callable[[], Awaitable[float]],
-        get_positions_fn: Callable[[], Awaitable[List[Dict]]],
+        get_positions_fn: Callable[[], Awaitable[list[dict]]],
     ) -> None:
         """Set dependencies for shutdown operations."""
         self._order_queue = order_queue
@@ -146,7 +151,7 @@ class EmergencyShutdown:
     ) -> ShutdownEvent:
         """
         Execute emergency shutdown.
-        
+
         Steps:
         1. Acquire lock to prevent concurrent shutdowns
         2. Cancel all pending orders
@@ -159,18 +164,16 @@ class EmergencyShutdown:
             if self._state == SystemState.SHUTDOWN:
                 logger.warning("[SHUTDOWN] Already shut down, ignoring")
                 return self._shutdown_log[-1] if self._shutdown_log else None
-            
+
             if self._state == SystemState.SHUTTING_DOWN:
                 logger.warning("[SHUTDOWN] Already shutting down")
                 return None
-            
+
             self._state = SystemState.SHUTTING_DOWN
             start_time = time.time()
-            
-            logger.critical(
-                f"[SHUTDOWN] EMERGENCY STOP TRIGGERED: {reason.value} - {details}"
-            )
-            
+
+            logger.critical(f"[SHUTDOWN] EMERGENCY STOP TRIGGERED: {reason.value} - {details}")
+
             # Get current state
             balance = 0.0
             try:
@@ -178,7 +181,7 @@ class EmergencyShutdown:
                     balance = await self._get_balance_fn()
             except Exception:
                 pass
-            
+
             # Step 1: Cancel pending orders
             pending_cancelled = 0
             if self._order_queue:
@@ -190,7 +193,7 @@ class EmergencyShutdown:
                     logger.info(f"[SHUTDOWN] Cancelled {pending_cancelled} pending orders")
                 except Exception as e:
                     logger.error(f"[SHUTDOWN] Error cancelling orders: {e}")
-            
+
             # Step 2: Close positions
             positions_closed = 0
             if self._executor and self._get_positions_fn:
@@ -202,7 +205,7 @@ class EmergencyShutdown:
                     logger.info(f"[SHUTDOWN] Closed {positions_closed} positions")
                 except Exception as e:
                     logger.error(f"[SHUTDOWN] Error closing positions: {e}")
-            
+
             # Step 3: Create event
             event = ShutdownEvent(
                 reason=reason,
@@ -214,7 +217,7 @@ class EmergencyShutdown:
                 pnl_at_shutdown=self._daily_loss,
             )
             self._shutdown_log.append(event)
-            
+
             # Step 4: Notify
             if self._notifier:
                 try:
@@ -231,17 +234,17 @@ Duration: {time.time() - start_time:.2f}s
                     )
                 except Exception as e:
                     logger.error(f"[SHUTDOWN] Notification failed: {e}")
-            
+
             # Step 5: Set final state
             self._state = SystemState.SHUTDOWN
-            
+
             logger.critical(
                 f"[SHUTDOWN] Complete. "
                 f"Closed {positions_closed} positions, "
                 f"Cancelled {pending_cancelled} orders, "
                 f"Duration: {time.time() - start_time:.2f}s"
             )
-            
+
             return event
 
     async def check_emergency_conditions(
@@ -249,65 +252,65 @@ Duration: {time.time() - start_time:.2f}s
         current_pnl: float,
         current_balance: float,
         open_positions_count: int,
-    ) -> Optional[ShutdownReason]:
+    ) -> ShutdownReason | None:
         """
         Check if any emergency condition is met.
-        
+
         Args:
             current_pnl: Current daily P&L
             current_balance: Current account balance
             open_positions_count: Number of open positions
-            
+
         Returns:
             ShutdownReason if emergency triggered, None otherwise
         """
         # Check daily loss
         if current_pnl <= -self.max_daily_loss:
             return ShutdownReason.DAILY_LOSS_LIMIT
-        
+
         # Update peak balance
         if current_balance > self._peak_balance:
             self._peak_balance = current_balance
-        
+
         # Check drawdown
         if self._peak_balance > 0:
             drawdown = (self._peak_balance - current_balance) / self._peak_balance
             if drawdown >= self.max_drawdown:
                 return ShutdownReason.DRAWING_LIMIT
-        
+
         # Update daily loss tracking
         self._daily_loss = current_pnl
-        
+
         return None
 
     def record_failure(self, error: str) -> None:
         """
         Record an operation failure for circuit breaker.
-        
+
         Args:
             error: Error message
         """
         now = time.time()
-        
+
         # Reset counter if timeout passed
-        if (self._circuit_breaker.last_failure_time and
-            now - self._circuit_breaker.last_failure_time > self.failure_timeout):
+        if (
+            self._circuit_breaker.last_failure_time
+            and now - self._circuit_breaker.last_failure_time > self.failure_timeout
+        ):
             self._circuit_breaker.consecutive_failures = 0
-        
+
         self._circuit_breaker.consecutive_failures += 1
         self._circuit_breaker.last_failure_time = now
-        
+
         logger.warning(
             f"[CIRCUIT] Failure {self._circuit_breaker.consecutive_failures}/"
             f"{self.max_failures}: {error}"
         )
-        
+
         # Check if should trip
         if self._circuit_breaker.consecutive_failures >= self.max_failures:
             self._circuit_breaker.is_tripped = True
-            self._circuit_breaker.trip_reason = (
-                f"{self.max_failures} consecutive failures"
-            )
+            self._circuit_breaker.trip_reason = f"{self.max_failures} consecutive failures"
             logger.critical(f"[CIRCUIT] CIRCUIT BREAKER TRIPPED: {error}")
 
     def record_success(self) -> None:
@@ -341,11 +344,11 @@ Duration: {time.time() - start_time:.2f}s
         """Get current system state."""
         return self._state
 
-    def get_shutdown_log(self) -> List[ShutdownEvent]:
+    def get_shutdown_log(self) -> list[ShutdownEvent]:
         """Get all shutdown events."""
         return self._shutdown_log.copy()
 
-    def get_stats(self) -> Dict[str, Any]:
+    def get_stats(self) -> dict[str, Any]:
         """Get shutdown system statistics."""
         return {
             "state": self._state.value,
@@ -368,10 +371,10 @@ Duration: {time.time() - start_time:.2f}s
 class ShutdownGuard:
     """
     Guard decorator/wrapper to prevent operations during shutdown.
-    
+
     Usage:
         shutdown_guard = ShutdownGuard(emergency_shutdown)
-        
+
         @shutdown_guard
         async def execute_order(...):
             ...
@@ -382,15 +385,12 @@ class ShutdownGuard:
 
     def __call__(self, func: Callable) -> Callable:
         """Decorator to guard async functions."""
+
         async def wrapper(*args, **kwargs):
             if self.shutdown.is_shutdown():
-                raise RuntimeError(
-                    f"Cannot execute {func.__name__}: system is shutdown"
-                )
+                raise RuntimeError(f"Cannot execute {func.__name__}: system is shutdown")
             if self.shutdown.is_circuit_tripped():
-                raise RuntimeError(
-                    f"Cannot execute {func.__name__}: circuit breaker tripped"
-                )
+                raise RuntimeError(f"Cannot execute {func.__name__}: circuit breaker tripped")
             try:
                 result = await func(*args, **kwargs)
                 self.shutdown.record_success()
@@ -398,7 +398,7 @@ class ShutdownGuard:
             except Exception as e:
                 self.shutdown.record_failure(str(e))
                 raise
-        
+
         return wrapper
 
 

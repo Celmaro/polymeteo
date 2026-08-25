@@ -1,15 +1,12 @@
 """Tests for the database layer."""
 
-import pytest
 from datetime import datetime, timezone
 
 from weather_copy_bot.db.models import (
-    Strategy,
-    StrategyRun,
-    Signal,
     Decision,
     Fill,
-    Tick,
+    Signal,
+    Strategy,
 )
 
 

@@ -40,8 +40,7 @@ class PolymarketClient:
                     m
                     for m in markets
                     if any(
-                        k
-                        in (m.get("question", "") + " " + m.get("slug", "")).lower()
+                        k in (m.get("question", "") + " " + m.get("slug", "")).lower()
                         for k in self.settings.weather_keywords
                     )
                 ]
@@ -71,8 +70,12 @@ class PolymarketClient:
                         continue
                     for item in resp.json():
                         title = str(item.get("title", item.get("slug", "")))
-                        if market_filter and market_filter.lower() not in title.lower() and not any(
-                            k in title.lower() for k in self.settings.strict_weather_keywords
+                        if (
+                            market_filter
+                            and market_filter.lower() not in title.lower()
+                            and not any(
+                                k in title.lower() for k in self.settings.strict_weather_keywords
+                            )
                         ):
                             continue
                         events.append(
@@ -81,11 +84,15 @@ class PolymarketClient:
                                 "wallet": wallet,
                                 "timestamp": item.get("timestamp")
                                 or datetime.now(timezone.utc).isoformat(),
-                                "market_slug": item.get("slug") or item.get("eventSlug") or "weather",
+                                "market_slug": item.get("slug")
+                                or item.get("eventSlug")
+                                or "weather",
                                 "market_title": title,
                                 "city": self._infer_city(title),
                                 "outcome": item.get("outcome", "Yes"),
-                                "side": "BUY" if str(item.get("side", "BUY")).upper() == "BUY" else "SELL",
+                                "side": "BUY"
+                                if str(item.get("side", "BUY")).upper() == "BUY"
+                                else "SELL",
                                 "price": float(item.get("price", 0.5)),
                                 "size_usd": float(item.get("usdcSize", item.get("size", 50))),
                                 "token_id": item.get("asset"),

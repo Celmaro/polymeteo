@@ -104,7 +104,10 @@ class CopyEngine:
         fresh: list[TradeSignal] = []
         now = datetime.now(timezone.utc)
         for event in events:
-            key = event.get("id") or f"{event.get('wallet')}:{event.get('timestamp')}:{event.get('market')}"
+            key = (
+                event.get("id")
+                or f"{event.get('wallet')}:{event.get('timestamp')}:{event.get('market')}"
+            )
             if key in self._seen:
                 continue
             self._seen.add(key)

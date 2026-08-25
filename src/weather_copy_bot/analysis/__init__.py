@@ -1,21 +1,21 @@
-from weather_copy_bot.analysis.wallet_analyzer import WalletAnalyzer
 from weather_copy_bot.analysis.obi_filter import (
     OBIAnalyzer,
     OBIIntegration,
-    OBIResult,
     OBIMetrics,
+    OBIResult,
     OBISignal,
     OrderBook,
     OrderBookLevel,
 )
+from weather_copy_bot.analysis.wallet_analyzer import WalletAnalyzer
 
 __all__ = [
-    "WalletAnalyzer",
     "OBIAnalyzer",
     "OBIIntegration",
-    "OBIResult",
     "OBIMetrics",
+    "OBIResult",
     "OBISignal",
     "OrderBook",
     "OrderBookLevel",
+    "WalletAnalyzer",
 ]

@@ -54,7 +54,7 @@ class TestCorsHeaders:
         client = TestClient(app, raise_server_exceptions=False)
         response = client.options(
             "/api/dashboard",
-            headers={"Origin": "http://localhost:5173", "Access-Control-Request-Method": "GET"}
+            headers={"Origin": "http://localhost:5173", "Access-Control-Request-Method": "GET"},
         )
         assert "access-control-allow-origin" in response.headers or response.status_code == 200
 

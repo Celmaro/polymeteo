@@ -1,4 +1,5 @@
 """Shared pytest fixtures and configuration."""
+
 from datetime import datetime, timezone
 
 import pytest
@@ -8,6 +9,7 @@ import pytest
 def reset_settings_cache():
     """Reset settings cache before each test."""
     from weather_copy_bot.config import get_settings
+
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
@@ -17,6 +19,7 @@ def reset_settings_cache():
 def sample_trade_signal():
     """Create a sample trade signal for testing."""
     from weather_copy_bot.models import Side, TradeSignal
+
     now = datetime.now(timezone.utc)
     return TradeSignal(
         signal_id="test-sig-1",
@@ -38,6 +41,7 @@ def sample_trade_signal():
 def sample_fill():
     """Create a sample fill for testing."""
     from weather_copy_bot.models import Fill, Side
+
     now = datetime.now(timezone.utc)
     return Fill(
         fill_id="test-fill-1",
@@ -62,6 +66,7 @@ def sample_fill():
 def sample_settings():
     """Create sample settings for testing."""
     from weather_copy_bot.config import Settings
+
     return Settings(
         max_copy_latency_ms=800,
         copy_ratio=0.25,

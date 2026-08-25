@@ -5,15 +5,16 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Optional, Callable, Awaitable
 
+import httpx
 import websockets
 from websockets.client import WebSocketClientProtocol
 
 from weather_copy_bot.models import Market, Side, TickData
-
 
 logger = logging.getLogger(__name__)
 
@@ -66,13 +67,13 @@ class TradeUpdate:
 class CLOBWebSocket:
     """
     WebSocket client for Polymarket CLOB.
-    
+
     Streams real-time order book updates and trades without REST polling.
-    
+
     Example:
         async def on_tick(tick: TickData):
             await signal_detector.process(tick)
-        
+
         async with CLOBWebSocket(on_tick=on_tick) as ws:
             await ws.subscribe("weather-nyc-rain-2024")
             await asyncio.Future()  # Run forever
@@ -81,27 +82,27 @@ class CLOBWebSocket:
     def __init__(
         self,
         ws_url: str = CLOB_WS_URL,
-        on_order_book: Optional[Callable[[OrderBookUpdate], Awaitable[None]]] = None,
-        on_trade: Optional[Callable[[TradeUpdate], Awaitable[None]]] = None,
-        on_tick: Optional[Callable[[TickData], Awaitable[None]]] = None,
-        on_error: Optional[Callable[[Exception], Awaitable[None]]] = None,
+        on_order_book: Callable[[OrderBookUpdate], Awaitable[None]] | None = None,
+        on_trade: Callable[[TradeUpdate], Awaitable[None]] | None = None,
+        on_tick: Callable[[TickData], Awaitable[None]] | None = None,
+        on_error: Callable[[Exception], Awaitable[None]] | None = None,
     ):
         self.ws_url = ws_url
-        self._ws: Optional[WebSocketClientProtocol] = None
+        self._ws: WebSocketClientProtocol | None = None
         self._subscriptions: dict[str, Subscription] = {}
         self._running = False
-        
+
         # Callbacks
         self._on_order_book = on_order_book
         self._on_trade = on_trade
         self._on_tick = on_tick
         self._on_error = on_error
-        
+
         # Order book state
         self._order_books: dict[str, dict[str, list[tuple[float, float]]]] = {}
         self._last_prices: dict[str, float] = {}
 
-    async def __aenter__(self) -> "CLOBWebSocket":
+    async def __aenter__(self) -> CLOBWebSocket:
         await self.connect()
         return self
 
@@ -112,7 +113,7 @@ class CLOBWebSocket:
         """Connect to CLOB WebSocket."""
         if self._ws and self._ws.open:
             return
-            
+
         logger.info(f"Connecting to {self.ws_url}")
         self._ws = await websockets.connect(
             self.ws_url,
@@ -134,28 +135,28 @@ class CLOBWebSocket:
     async def subscribe(self, market_slug: str) -> None:
         """
         Subscribe to a market's order book and trades.
-        
+
         Args:
             market_slug: e.g., "weather-nyc-rain-2024"
         """
         if market_slug in self._subscriptions:
             logger.debug(f"Already subscribed to {market_slug}")
             return
-            
+
         subscription = Subscription(market_slug=market_slug)
         self._subscriptions[market_slug] = subscription
         self._order_books[market_slug] = {"bids": [], "asks": []}
-        
+
         # Initialize order book via REST
         await self._fetch_initial_book(market_slug)
-        
+
         # Send subscription message
         subscribe_msg = {
             "type": "subscribe",
             "channel": "orderbook",
             "market": market_slug,
         }
-        
+
         if self._ws:
             await self._ws.send(json.dumps(subscribe_msg))
             logger.info(f"Subscribed to {market_slug}")
@@ -164,22 +165,24 @@ class CLOBWebSocket:
         """Unsubscribe from a market."""
         if market_slug not in self._subscriptions:
             return
-            
+
         del self._subscriptions[market_slug]
         del self._order_books[market_slug]
-        
+
         if self._ws:
-            await self._ws.send(json.dumps({
-                "type": "unsubscribe",
-                "channel": "orderbook", 
-                "market": market_slug,
-            }))
+            await self._ws.send(
+                json.dumps(
+                    {
+                        "type": "unsubscribe",
+                        "channel": "orderbook",
+                        "market": market_slug,
+                    }
+                )
+            )
             logger.info(f"Unsubscribed from {market_slug}")
 
     async def _fetch_initial_book(self, market_slug: str) -> None:
         """Fetch initial order book via REST."""
-        import httpx
-        
         try:
             url = f"{CLOB_API_URL}/orderbook/{market_slug}"
             async with httpx.AsyncClient() as client:
@@ -203,7 +206,7 @@ class CLOBWebSocket:
         try:
             msg = json.loads(raw)
             msg_type = msg.get("type", "")
-            
+
             if msg_type == "orderbook":
                 await self._handle_orderbook(msg)
             elif msg_type == "trade":
@@ -214,7 +217,7 @@ class CLOBWebSocket:
                 logger.error(f"CLOB error: {msg}")
                 if self._on_error:
                     await self._on_error(Exception(msg.get("message", "Unknown error")))
-                    
+
         except json.JSONDecodeError:
             logger.warning(f"Invalid JSON: {raw[:100]}")
         except Exception as e:
@@ -227,15 +230,15 @@ class CLOBWebSocket:
         market_slug = msg.get("market", "")
         if market_slug not in self._subscriptions:
             return
-            
+
         updates = msg.get("changes", [])
         for price_str, size_str, side in updates:
             price = float(price_str)
             size = float(size_str)
-            
+
             book = self._order_books[market_slug]
             key = "bids" if side == "buy" else "asks"
-            
+
             # Update order book
             levels = book[key]
             if size == 0:
@@ -244,7 +247,7 @@ class CLOBWebSocket:
             else:
                 # Update level
                 found = False
-                for i, (p, s) in enumerate(levels):
+                for i, (p, _s) in enumerate(levels):
                     if p == price:
                         levels[i] = (price, size)
                         found = True
@@ -252,7 +255,7 @@ class CLOBWebSocket:
                 if not found:
                     levels.append((price, size))
                     levels.sort(key=lambda x: x[0], reverse=(key == "bids"))
-            
+
             # Fire callback
             if self._on_order_book:
                 update = OrderBookUpdate(
@@ -270,7 +273,7 @@ class CLOBWebSocket:
         market_slug = msg.get("market", "")
         if market_slug not in self._subscriptions:
             return
-            
+
         trade = TradeUpdate(
             market_slug=market_slug,
             price=float(msg.get("price", 0)),
@@ -280,12 +283,12 @@ class CLOBWebSocket:
             filler=msg.get("filler", ""),
             timestamp=datetime.now(timezone.utc),
         )
-        
+
         self._last_prices[market_slug] = trade.price
-        
+
         if self._on_trade:
             await self._on_trade(trade)
-        
+
         # Generate tick for signal detection
         if self._on_tick:
             tick = TickData(
@@ -301,49 +304,44 @@ class CLOBWebSocket:
         market_slug = msg.get("market", "")
         if market_slug not in self._order_books:
             return
-            
+
         bids = msg.get("bids", [])
         asks = msg.get("asks", [])
-        
+
         self._order_books[market_slug] = {
             "bids": [(float(p), float(s)) for p, s in bids],
             "asks": [(float(p), float(s)) for p, s in asks],
         }
-        
+
         if bids:
             self._last_prices[market_slug] = float(bids[0][0])
 
     async def run(self) -> None:
         """
         Main event loop - run forever processing messages.
-        
+
         Call this after subscribing to markets.
         """
         while self._running and self._ws:
-            try:
+            with suppress(websockets.ConnectionClosed):
                 async for raw in self._ws:
-                    await self._handle_message(raw)
-            except websockets.ConnectionClosed:
+                    with suppress(Exception):
+                        await self._handle_message(raw)
+            if self._running:
                 logger.warning("Connection closed, reconnecting...")
                 await asyncio.sleep(5)
                 await self.connect()
-                # Re-subscribe
                 for slug in self._subscriptions:
                     await self.subscribe(slug)
-            except Exception as e:
-                logger.error(f"WebSocket error: {e}")
-                if self._on_error:
-                    await self._on_error(e)
-                await asyncio.sleep(1)
 
-    def get_best_bid_ask(self, market_slug: str) -> tuple[Optional[float], Optional[float]]:
+    def get_best_bid_ask(self, market_slug: str) -> tuple[float | None, float | None]:
         """Get best bid and ask for a market."""
         book = self._order_books.get(market_slug, {"bids": [], "asks": []})
         best_bid = book["bids"][0][0] if book["bids"] else None
         best_ask = book["asks"][0][0] if book["asks"] else None
         return best_bid, best_ask
 
-    def get_mid_price(self, market_slug: str) -> Optional[float]:
+    def get_mid_price(self, market_slug: str) -> float | None:
         """Get mid price for a market."""
         bid, ask = self.get_best_bid_ask(market_slug)
         if bid and ask:
@@ -354,16 +352,16 @@ class CLOBWebSocket:
 class CLOBRESTClient:
     """
     REST fallback client for CLOB API.
-    
+
     Used for initial data fetch and when WebSocket is unavailable.
     """
 
-    def __init__(self, api_url: str = CLOB_API_URL, api_key: Optional[str] = None):
+    def __init__(self, api_url: str = CLOB_API_URL, api_key: str | None = None):
         self.api_url = api_url
         self._api_key = api_key
-        self._client: Optional[httpx.AsyncClient] = None
+        self._client: httpx.AsyncClient | None = None
 
-    async def __aenter__(self) -> "CLOBRESTClient":
+    async def __aenter__(self) -> CLOBRESTClient:
         self._client = httpx.AsyncClient(base_url=self.api_url, timeout=10.0)
         return self
 

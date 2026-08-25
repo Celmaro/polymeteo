@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
-from typing import Optional, Callable, Awaitable
+from collections.abc import Awaitable, Callable
 
 from pydantic import BaseModel
-
 
 logger = logging.getLogger(__name__)
 
@@ -18,9 +16,7 @@ class TelegramConfig(BaseModel):
     bot_token: str
     allowed_users: list[int] = []  # Telegram user IDs
     admin_user_ids: list[int] = []  # Users with admin privileges
-    commands: list[str] = [
-        "start", "stop", "status", "pnl", "positions", "wallets", "help"
-    ]
+    commands: list[str] = ["start", "stop", "status", "pnl", "positions", "wallets", "help"]
 
 
 class BotStatus(BaseModel):
@@ -33,13 +29,13 @@ class BotStatus(BaseModel):
     open_positions: int
     watched_wallets: int
     latency_avg_ms: float
-    last_signal_at: Optional[str] = None
+    last_signal_at: str | None = None
 
 
 class TelegramBot:
     """
     Telegram bot for remote control and notifications.
-    
+
     Commands:
         /start - Start the trading bot
         /stop - Stop the trading bot
@@ -48,22 +44,22 @@ class TelegramBot:
         /positions - List open positions
         /wallets - List watched wallets
         /help - Show help message
-    
+
     Example:
         bot = TelegramBot(config=TelegramConfig(
             bot_token="123456:ABC-DEF...",
             admin_user_ids=[12345678],
         ))
-        
+
         await bot.send_notification("Bot started", alert=True)
     """
 
     def __init__(
         self,
         config: TelegramConfig,
-        status_provider: Optional[Callable[[], Awaitable[BotStatus]]] = None,
-        start_handler: Optional[Callable[[], Awaitable[None]]] = None,
-        stop_handler: Optional[Callable[[], Awaitable[None]]] = None,
+        status_provider: Callable[[], Awaitable[BotStatus]] | None = None,
+        start_handler: Callable[[], Awaitable[None]] | None = None,
+        stop_handler: Callable[[], Awaitable[None]] | None = None,
     ):
         self.config = config
         self._status_provider = status_provider
@@ -81,7 +77,7 @@ class TelegramBot:
         self._running = False
         logger.info("Telegram bot stopped")
 
-    async def send_message(self, text: str, chat_id: Optional[int] = None) -> bool:
+    async def send_message(self, text: str, chat_id: int | None = None) -> bool:
         """Send a message to a chat."""
         # In production, this would use python-telegram-bot or httpx
         logger.info(f"Telegram message: {text[:100]}")
@@ -91,11 +87,11 @@ class TelegramBot:
         self,
         message: str,
         alert: bool = False,
-        chat_id: Optional[int] = None,
+        chat_id: int | None = None,
     ) -> bool:
         """
         Send a notification (with optional alert formatting).
-        
+
         Args:
             message: The notification text
             alert: Add alert formatting (🔔, ⚠️, ❌, etc.)
@@ -130,7 +126,7 @@ Fill ID: {fill_id[:16]}...
         self,
         error_type: str,
         error_message: str,
-        context: Optional[str] = None,
+        context: str | None = None,
     ) -> bool:
         """Send an error alert."""
         message = f"""
@@ -138,14 +134,14 @@ Fill ID: {fill_id[:16]}...
 
 Type: {error_type}
 Message: {error_message}
-{f'Context: {context}' if context else ''}
+{f"Context: {context}" if context else ""}
 """
         return await self.send_notification(message.strip(), alert=True)
 
     def format_status(self, status: BotStatus) -> str:
         """Format status as a Telegram message."""
         running_emoji = "🟢 Running" if status.running else "🔴 Stopped"
-        
+
         message = f"""
 📊 Polymeteo Status
 ━━━━━━━━━━━━━━━━━━
@@ -156,7 +152,7 @@ Daily P&L: ${status.daily_pnl:.2f}
 Open Positions: {status.open_positions}
 Watched Wallets: {status.watched_wallets}
 Avg Latency: {status.latency_avg_ms:.0f}ms
-Last Signal: {status.last_signal_at or 'None'}
+Last Signal: {status.last_signal_at or "None"}
 """
         return message.strip()
 
@@ -164,19 +160,19 @@ Last Signal: {status.last_signal_at or 'None'}
         self,
         command: str,
         user_id: int,
-        args: list[str] = None,
-    ) -> Optional[str]:
+        args: list[str] | None = None,
+    ) -> str | None:
         """
         Handle a Telegram command.
-        
+
         Returns response message or None.
         """
         args = args or []
-        
+
         # Check authorization
         is_admin = user_id in self.config.admin_user_ids
         is_allowed = user_id in self.config.allowed_users or is_admin
-        
+
         if not is_allowed:
             return "⛔ You are not authorized to use this bot."
 
@@ -186,18 +182,18 @@ Last Signal: {status.last_signal_at or 'None'}
                 await self._start_handler()
             return "✅ Polymeteo started!"
 
-        elif command == "/stop":
+        if command == "/stop":
             if self._stop_handler and is_admin:
                 await self._stop_handler()
             return "⏹️ Polymeteo stopped."
 
-        elif command == "/status":
+        if command == "/status":
             if self._status_provider:
                 status = await self._status_provider()
                 return self.format_status(status)
             return "Status provider not configured."
 
-        elif command == "/pnl":
+        if command == "/pnl":
             if self._status_provider:
                 status = await self._status_provider()
                 return f"""
@@ -208,7 +204,7 @@ Daily: ${status.daily_pnl:.2f}
 """
             return "Status provider not configured."
 
-        elif command == "/help":
+        if command == "/help":
             return """
 📚 Commands
 ━━━━━━━━━━━
@@ -232,22 +228,25 @@ async def send_telegram_message(
 ) -> bool:
     """
     Send a simple Telegram message via API.
-    
+
     Requires:
         - bot_token: From @BotFather
         - chat_id: Telegram chat ID
     """
     import httpx
-    
+
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    
+
     try:
         async with httpx.AsyncClient() as client:
-            resp = await client.post(url, json={
-                "chat_id": chat_id,
-                "text": text,
-                "parse_mode": "Markdown",
-            })
+            resp = await client.post(
+                url,
+                json={
+                    "chat_id": chat_id,
+                    "text": text,
+                    "parse_mode": "Markdown",
+                },
+            )
             return resp.status_code == 200
     except Exception as e:
         logger.error(f"Failed to send Telegram message: {e}")

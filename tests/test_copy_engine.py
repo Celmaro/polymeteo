@@ -1,4 +1,5 @@
 """Tests for CopyEngine signal processing and polling."""
+
 import asyncio
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock
@@ -150,7 +151,18 @@ class TestPollOnce:
         engine = CopyEngine()
         engine._seen.add("evt-1")
         mock_events = [
-            {"id": "evt-1", "wallet": "0xtarget", "timestamp": datetime.now(timezone.utc).isoformat(), "market_slug": "weather", "market_title": "Weather?", "city": "Tokyo", "outcome": "Yes", "side": "BUY", "price": 0.5, "size_usd": 100},
+            {
+                "id": "evt-1",
+                "wallet": "0xtarget",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "market_slug": "weather",
+                "market_title": "Weather?",
+                "city": "Tokyo",
+                "outcome": "Yes",
+                "side": "BUY",
+                "price": 0.5,
+                "size_usd": 100,
+            },
         ]
         engine.client.fetch_target_activity = AsyncMock(return_value=mock_events)
         signals = await engine.poll_once()
@@ -160,7 +172,20 @@ class TestPollOnce:
     async def test_poll_injects_demo_latency(self):
         engine = CopyEngine()
         mock_events = [
-            {"id": "evt-demo", "wallet": "0xtarget", "timestamp": datetime.now(timezone.utc).isoformat(), "market_slug": "weather", "market_title": "Weather?", "city": "Tokyo", "outcome": "Yes", "side": "BUY", "price": 0.5, "size_usd": 100, "demo": True, "latency_ms": 350},
+            {
+                "id": "evt-demo",
+                "wallet": "0xtarget",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "market_slug": "weather",
+                "market_title": "Weather?",
+                "city": "Tokyo",
+                "outcome": "Yes",
+                "side": "BUY",
+                "price": 0.5,
+                "size_usd": 100,
+                "demo": True,
+                "latency_ms": 350,
+            },
         ]
         engine.client.fetch_target_activity = AsyncMock(return_value=mock_events)
         signals = await engine.poll_once()

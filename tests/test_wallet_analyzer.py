@@ -1,4 +1,5 @@
 """Tests for WalletAnalyzer scoring and wallet ranking."""
+
 from datetime import datetime, timezone
 
 from weather_copy_bot.analysis.wallet_analyzer import WalletAnalyzer
@@ -145,17 +146,16 @@ class TestCopyRecommendations:
 
     def test_recommendation_primary(self):
         analyzer = WalletAnalyzer(min_trades=3)
-        fills = [
-            _make_fill("0xPRIMARY", pnl=15.0, latency_ms=200)
-            for _ in range(10)
-        ]
+        fills = [_make_fill("0xPRIMARY", pnl=15.0, latency_ms=200) for _ in range(10)]
         cards = analyzer.score(fills)
         assert cards[0].copy_recommendation == "PRIMARY"
 
     def test_recommendation_satellite(self):
         analyzer = WalletAnalyzer(min_trades=5)
         fills = [
-            _make_fill("0xSAT", pnl=3.0, latency_ms=400) if i % 2 == 0 else _make_fill("0xSAT", pnl=-2.0, latency_ms=400)
+            _make_fill("0xSAT", pnl=3.0, latency_ms=400)
+            if i % 2 == 0
+            else _make_fill("0xSAT", pnl=-2.0, latency_ms=400)
             for i in range(8)
         ]
         cards = analyzer.score(fills)
@@ -164,7 +164,9 @@ class TestCopyRecommendations:
     def test_recommendation_watchlist(self):
         analyzer = WalletAnalyzer(min_trades=5)
         fills = [
-            _make_fill("0xWATCH", pnl=1.0, latency_ms=550) if i % 3 == 0 else _make_fill("0xWATCH", pnl=-1.5, latency_ms=550)
+            _make_fill("0xWATCH", pnl=1.0, latency_ms=550)
+            if i % 3 == 0
+            else _make_fill("0xWATCH", pnl=-1.5, latency_ms=550)
             for i in range(8)
         ]
         cards = analyzer.score(fills)
@@ -177,20 +179,24 @@ class TestTargetSelection:
     def test_select_targets_respects_max(self):
         analyzer = WalletAnalyzer(min_trades=3)
         cards = [
-            type("Card", (), {
-                "copy_recommendation": "PRIMARY",
-                "wallet": f"0x{i}",
-                "alias": f"Wallet {i}",
-                "total_pnl_usd": 100.0,
-                "win_rate": 70.0,
-                "trade_count": 50,
-                "avg_latency_ms": 300.0,
-                "sharpe": 1.5,
-                "max_drawdown_pct": 5.0,
-                "profit_factor": 2.0,
-                "specialty_cities": [],
-                "consistency_score": 85.0,
-            })()
+            type(
+                "Card",
+                (),
+                {
+                    "copy_recommendation": "PRIMARY",
+                    "wallet": f"0x{i}",
+                    "alias": f"Wallet {i}",
+                    "total_pnl_usd": 100.0,
+                    "win_rate": 70.0,
+                    "trade_count": 50,
+                    "avg_latency_ms": 300.0,
+                    "sharpe": 1.5,
+                    "max_drawdown_pct": 5.0,
+                    "profit_factor": 2.0,
+                    "specialty_cities": [],
+                    "consistency_score": 85.0,
+                },
+            )()
             for i in range(5)
         ]
         selected = analyzer.select_targets(cards, max_targets=3)
@@ -199,20 +205,24 @@ class TestTargetSelection:
     def test_select_targets_filters_by_recommendation(self):
         analyzer = WalletAnalyzer()
         cards = [
-            type("Card", (), {
-                "copy_recommendation": rec,
-                "wallet": f"0x{i}",
-                "alias": f"Wallet {i}",
-                "total_pnl_usd": 100.0,
-                "win_rate": 70.0,
-                "trade_count": 50,
-                "avg_latency_ms": 300.0,
-                "sharpe": 1.5,
-                "max_drawdown_pct": 5.0,
-                "profit_factor": 2.0,
-                "specialty_cities": [],
-                "consistency_score": 85.0,
-            })()
+            type(
+                "Card",
+                (),
+                {
+                    "copy_recommendation": rec,
+                    "wallet": f"0x{i}",
+                    "alias": f"Wallet {i}",
+                    "total_pnl_usd": 100.0,
+                    "win_rate": 70.0,
+                    "trade_count": 50,
+                    "avg_latency_ms": 300.0,
+                    "sharpe": 1.5,
+                    "max_drawdown_pct": 5.0,
+                    "profit_factor": 2.0,
+                    "specialty_cities": [],
+                    "consistency_score": 85.0,
+                },
+            )()
             for i, rec in enumerate(["PRIMARY", "PRIMARY", "WATCHLIST", "PRIMARY", "SATELLITE"])
         ]
         selected = analyzer.select_targets(cards)

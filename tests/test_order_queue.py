@@ -1,11 +1,10 @@
 """Tests for Order Queue."""
 
 import pytest
-import asyncio
 
 from weather_copy_bot.engine.order_queue import (
-    OrderQueue,
     Order,
+    OrderQueue,
     OrderState,
 )
 
@@ -30,7 +29,7 @@ class TestOrderQueue:
             size_usd=100.0,
             price=0.50,
         )
-        
+
         assert order_id is not None
         order = queue.get_order(order_id)
         assert order is not None
@@ -47,17 +46,17 @@ class TestOrderQueue:
             size_usd=100.0,
             price=0.50,
         )
-        
+
         order_id2 = await queue.enqueue(
             token_id="TOKEN1",  # Same token
-            side="BUY",          # Same side
+            side="BUY",  # Same side
             size_usd=200.0,
             price=0.52,
         )
-        
+
         assert order_id1 is not None
         assert order_id2 is None  # Should be rejected
-        
+
         stats = queue.get_stats()
         assert stats["duplicates_rejected"] == 1
 
@@ -70,14 +69,14 @@ class TestOrderQueue:
             size_usd=100.0,
             price=0.50,
         )
-        
+
         order_id2 = await queue.enqueue(
             token_id="TOKEN1",
             side="SELL",  # Different side
             size_usd=100.0,
             price=0.50,
         )
-        
+
         assert order_id1 is not None
         assert order_id2 is not None
 
@@ -90,16 +89,16 @@ class TestOrderQueue:
             size_usd=100.0,
             price=0.50,
         )
-        
+
         # Initial state
         order = queue.get_order(order_id)
         assert order.state == OrderState.PENDING
-        
+
         # Submit
         await queue.submit(order_id)
         order = queue.get_order(order_id)
         assert order.state == OrderState.SUBMITTED
-        
+
         # Fill
         await queue.mark_filled(order_id)
         order = queue.get_order(order_id)
@@ -115,9 +114,9 @@ class TestOrderQueue:
             size_usd=100.0,
             price=0.50,
         )
-        
+
         await queue.mark_cancelled(order_id, "User requested")
-        
+
         order = queue.get_order(order_id)
         assert order.state == OrderState.CANCELLED
         assert order.error == "User requested"
@@ -131,15 +130,15 @@ class TestOrderQueue:
             size_usd=100.0,
             price=0.50,
         )
-        
+
         # Reject twice
         await queue.mark_rejected(order_id, "Insufficient liquidity")
         await queue.mark_rejected(order_id, "Price moved")
-        
+
         order = queue.get_order(order_id)
         assert order.retries == 2
         assert order.state == OrderState.PENDING  # Reset for retry
-        
+
         # Final rejection
         await queue.mark_rejected(order_id, "Final rejection")
         order = queue.get_order(order_id)
@@ -151,7 +150,7 @@ class TestOrderQueue:
         await queue.enqueue("T1", "BUY", 100.0, 0.50)
         await queue.enqueue("T2", "BUY", 100.0, 0.50)
         await queue.enqueue("T3", "BUY", 100.0, 0.50)
-        
+
         pending = queue.get_pending_orders()
         assert len(pending) == 3
 
@@ -159,9 +158,9 @@ class TestOrderQueue:
     async def test_get_active_orders(self, queue):
         """Test getting active orders."""
         order_id = await queue.enqueue("T1", "BUY", 100.0, 0.50)
-        
+
         await queue.submit(order_id)
-        
+
         active = queue.get_active_orders()
         assert len(active) == 1
         assert active[0].order_id == order_id
@@ -170,15 +169,15 @@ class TestOrderQueue:
     async def test_rate_limiting(self, queue):
         """Test rate limiting."""
         queue.rate_limit = 2
-        
+
         # First two should succeed
         await queue.submit("fake1")
         await queue.submit("fake2")
-        
+
         # Third should be rate limited
         result = await queue._check_rate_limit()
         assert result is False
-        
+
         stats = queue.get_stats()
         assert stats["rate_limited"] == 1
 
@@ -188,7 +187,7 @@ class TestOrderQueue:
         await queue.enqueue("T1", "BUY", 100.0, 0.50)
         await queue.enqueue("T2", "BUY", 100.0, 0.50)
         await queue.enqueue("T3", "BUY", 100.0, 0.50)  # Duplicate
-        
+
         stats = queue.get_stats()
         assert stats["orders_queued"] == 3
         assert stats["duplicates_rejected"] == 1
@@ -196,17 +195,10 @@ class TestOrderQueue:
     @pytest.mark.asyncio
     async def test_priority_queue(self, queue):
         """Test priority ordering."""
-        # Add orders with different priorities
-        low_priority = await queue.enqueue(
-            "T1", "BUY", 100.0, 0.50, priority=1
-        )
-        high_priority = await queue.enqueue(
-            "T2", "BUY", 100.0, 0.50, priority=10
-        )
-        medium_priority = await queue.enqueue(
-            "T3", "BUY", 100.0, 0.50, priority=5
-        )
-        
+        await queue.enqueue("T1", "BUY", 100.0, 0.50, priority=1)
+        await queue.enqueue("T2", "BUY", 100.0, 0.50, priority=10)
+        await queue.enqueue("T3", "BUY", 100.0, 0.50, priority=5)
+
         # High priority should be processed first
         # (Note: actual order depends on asyncio queue behavior)
 
@@ -222,7 +214,7 @@ class TestOrder:
             size_usd=100.0,
             price=0.50,
         )
-        
+
         assert order.order_id is not None
         assert order.state == OrderState.PENDING
         assert order.retries == 0
@@ -238,6 +230,6 @@ class TestOrder:
             price=0.50,
             metadata={"wallet": "0x123", "quorum_size": 3},
         )
-        
+
         assert order.metadata["wallet"] == "0x123"
         assert order.metadata["quorum_size"] == 3

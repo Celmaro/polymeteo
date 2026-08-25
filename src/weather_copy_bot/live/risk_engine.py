@@ -5,10 +5,8 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Optional
 
-from weather_copy_bot.models import TradeSignal, Side
-
+from weather_copy_bot.models import Side, TradeSignal
 
 logger = logging.getLogger(__name__)
 
@@ -20,24 +18,24 @@ class RiskLimits:
     # Position limits
     max_position_usd: float = 250.0
     max_total_exposure_usd: float = 1000.0
-    
+
     # Daily loss limits
     max_daily_loss_usd: float = 500.0
     max_daily_loss_pct: float = 5.0  # % of balance
-    
+
     # Per-trade limits
     min_trade_size_usd: float = 5.0
     max_trade_size_usd: float = 100.0
     max_trades_per_day: int = 50
-    
+
     # Latency limits
     max_latency_ms: int = 800
     max_slippage_bps: float = 50.0
-    
+
     # Liquidity limits
     min_orderbook_depth_usd: float = 1000.0
     min_spread_bps: float = 1.0
-    
+
     # Emergency stops
     enable_circuit_breaker: bool = True
     circuit_breaker_threshold: float = 0.10  # 10% drawdown
@@ -50,7 +48,7 @@ class RiskCheck:
     passed: bool
     rejected: bool = False
     reason: str = ""
-    adjustment: Optional[float] = None  # Adjusted size if applicable
+    adjustment: float | None = None  # Adjusted size if applicable
     severity: str = "INFO"  # INFO, WARNING, ERROR
 
 
@@ -70,14 +68,14 @@ class Position:
 class RiskEngine:
     """
     Risk engine with circuit breakers and position management.
-    
+
     Implements:
     - Position size limits
     - Daily loss limits
     - Circuit breakers for emergency stops
     - Liquidity checks
     - Slippage estimation
-    
+
     Example:
         engine = RiskEngine(
             limits=RiskLimits(
@@ -85,7 +83,7 @@ class RiskEngine:
                 max_position_usd=250.0,
             )
         )
-        
+
         # Before executing a trade
         check = engine.check_trade(
             signal=signal,
@@ -94,7 +92,7 @@ class RiskEngine:
             daily_pnl=-200.0,
             positions=open_positions,
         )
-        
+
         if check.rejected:
             logger.warning(f"Trade rejected: {check.reason}")
         elif check.adjustment:
@@ -103,7 +101,7 @@ class RiskEngine:
 
     def __init__(
         self,
-        limits: Optional[RiskLimits] = None,
+        limits: RiskLimits | None = None,
     ):
         self.limits = limits or RiskLimits()
         self._reset_state()
@@ -116,7 +114,7 @@ class RiskEngine:
         self._open_positions: dict[str, Position] = {}
         self._peak_balance = 0.0
         self._circuit_breaker_tripped = False
-        self._circuit_breaker_reason: Optional[str] = None
+        self._circuit_breaker_reason: str | None = None
 
     def _check_day_reset(self) -> None:
         """Reset daily counters if new day."""
@@ -138,7 +136,7 @@ class RiskEngine:
     ) -> RiskCheck:
         """
         Check if a trade passes risk controls.
-        
+
         Args:
             signal: The trading signal
             size_usd: Proposed trade size
@@ -146,12 +144,12 @@ class RiskEngine:
             daily_pnl: Current daily P&L
             positions: Open positions
             orderbook_depth: Available liquidity in orderbook
-            
+
         Returns:
             RiskCheck with result and any adjustments needed
         """
         self._check_day_reset()
-        
+
         # Check 1: Circuit breaker
         if self.limits.enable_circuit_breaker and self._circuit_breaker_tripped:
             return RiskCheck(
@@ -276,12 +274,12 @@ class RiskEngine:
     ) -> RiskCheck:
         """
         Check if a market is tradeable.
-        
+
         Args:
             market_slug: Market identifier
             bid: Best bid price
             ask: Best ask price
-            
+
         Returns:
             RiskCheck with market suitability
         """
@@ -312,11 +310,11 @@ class RiskEngine:
         if self._peak_balance == 0:
             self._peak_balance = current_balance
             return 0.0
-        
+
         if current_balance > self._peak_balance:
             self._peak_balance = current_balance
             return 0.0
-        
+
         return (self._peak_balance - current_balance) / self._peak_balance
 
     def update_positions(self, positions: list[Position]) -> None:
@@ -358,7 +356,7 @@ class RiskEngine:
 class LiquidityChecker:
     """
     Checks orderbook liquidity before executing trades.
-    
+
     Prevents trading in illiquid markets.
     """
 
@@ -374,12 +372,12 @@ class LiquidityChecker:
     ) -> tuple[bool, str]:
         """
         Check if there's sufficient liquidity for an order.
-        
+
         Args:
             levels: Orderbook levels (price, size)
             side: Order side
             order_size: Desired order size
-            
+
         Returns:
             (sufficient, reason)
         """
@@ -388,7 +386,7 @@ class LiquidityChecker:
 
         # Calculate total depth at each level
         cumulative = 0.0
-        for price, size in levels:
+        for _price, size in levels:
             cumulative += size
             if cumulative >= order_size:
                 break
@@ -406,7 +404,7 @@ class LiquidityChecker:
     ) -> float:
         """
         Estimate slippage for an order.
-        
+
         Returns slippage in basis points.
         """
         if not levels:
@@ -414,11 +412,11 @@ class LiquidityChecker:
 
         # Best price
         best_price = levels[0][0]
-        
+
         # Calculate volume-weighted average fill price
         remaining = order_size
         total_cost = 0.0
-        
+
         for price, size in levels:
             fill = min(remaining, size)
             total_cost += fill * price
@@ -430,7 +428,7 @@ class LiquidityChecker:
             return 1000.0  # Couldn't fill
 
         avg_price = total_cost / order_size
-        
+
         # Slippage calculation
         if side == Side.BUY:
             slippage = (avg_price - best_price) / best_price

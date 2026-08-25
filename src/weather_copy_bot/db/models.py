@@ -4,14 +4,12 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum as PyEnum
-from typing import Optional
 
 from sqlalchemy import (
     JSON,
     BigInteger,
     Boolean,
     DateTime,
-    Enum,
     Float,
     ForeignKey,
     Index,
@@ -46,7 +44,7 @@ class Strategy(Base):
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     version: Mapped[int] = mapped_column(Integer, default=1)
-    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Core parameters
     copy_ratio: Mapped[float] = mapped_column(Float, default=0.25)
@@ -61,7 +59,7 @@ class Strategy(Base):
     fee_rate: Mapped[float] = mapped_column(Float, default=0.002)
 
     # JSON for any extra parameters
-    params_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    params_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     # Metadata
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -71,7 +69,7 @@ class Strategy(Base):
     )
 
     # Relationships
-    runs: Mapped[list["StrategyRun"]] = relationship(back_populates="strategy")
+    runs: Mapped[list[StrategyRun]] = relationship(back_populates="strategy")
 
     __table_args__ = (
         UniqueConstraint("name", "version", name="uq_strategy_name_version"),
@@ -92,31 +90,29 @@ class StrategyRun(Base):
 
     # Run metadata
     started_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    ended_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     # Market filter for this run
-    market_filter: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    market_filter: Mapped[str | None] = mapped_column(String(200), nullable=True)
 
     # Starting balance
     starting_balance: Mapped[float] = mapped_column(Float, default=10_000.0)
 
     # Performance summary (computed after run)
-    ending_balance: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
-    total_pnl: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    ending_balance: Mapped[float | None] = mapped_column(Float, nullable=True)
+    total_pnl: Mapped[float | None] = mapped_column(Float, nullable=True)
     trade_count: Mapped[int] = mapped_column(Integer, default=0)
-    win_rate: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
-    sharpe: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
-    max_drawdown_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    win_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    sharpe: Mapped[float | None] = mapped_column(Float, nullable=True)
+    max_drawdown_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     # Relationships
-    strategy: Mapped["Strategy"] = relationship(back_populates="runs")
-    ticks: Mapped[list["Tick"]] = relationship(back_populates="run")
-    signals: Mapped[list["Signal"]] = relationship(back_populates="run")
-    decisions: Mapped[list["Decision"]] = relationship(back_populates="run")
+    strategy: Mapped[Strategy] = relationship(back_populates="runs")
+    ticks: Mapped[list[Tick]] = relationship(back_populates="run")
+    signals: Mapped[list[Signal]] = relationship(back_populates="run")
+    decisions: Mapped[list[Decision]] = relationship(back_populates="run")
 
-    __table_args__ = (
-        Index("ix_strategy_run_strategy_started", "strategy_id", "started_at"),
-    )
+    __table_args__ = (Index("ix_strategy_run_strategy_started", "strategy_id", "started_at"),)
 
 
 class Tick(Base):
@@ -125,25 +121,23 @@ class Tick(Base):
     __tablename__ = "ticks"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    run_id: Mapped[int] = mapped_column(
-        BigInteger, ForeignKey("strategy_runs.id"), nullable=False
-    )
+    run_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("strategy_runs.id"), nullable=False)
 
     timestamp: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     market_slug: Mapped[str] = mapped_column(String(200), nullable=False)
-    market_title: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    market_title: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
     # Price data
     yes_price: Mapped[float] = mapped_column(Float, nullable=False)
-    no_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
-    volume: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    no_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    volume: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     # Optional weather-specific fields
-    city: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
-    outcome: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    city: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    outcome: Mapped[str | None] = mapped_column(String(50), nullable=True)
 
     # Relationships
-    run: Mapped["StrategyRun"] = relationship(back_populates="ticks")
+    run: Mapped[StrategyRun] = relationship(back_populates="ticks")
 
     __table_args__ = (
         Index("ix_tick_run_timestamp", "run_id", "timestamp"),
@@ -157,7 +151,7 @@ class Signal(Base):
     __tablename__ = "signals"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    run_id: Mapped[Optional[int]] = mapped_column(
+    run_id: Mapped[int | None] = mapped_column(
         BigInteger, ForeignKey("strategy_runs.id"), nullable=True
     )
 
@@ -166,15 +160,15 @@ class Signal(Base):
     # Source info
     target_wallet: Mapped[str] = mapped_column(String(100), nullable=False)
     market_slug: Mapped[str] = mapped_column(String(200), nullable=False)
-    market_title: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
-    city: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
-    outcome: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    market_title: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    city: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    outcome: Mapped[str | None] = mapped_column(String(50), nullable=True)
 
     # Signal details
     side: Mapped[str] = mapped_column(String(10), nullable=False)
     price: Mapped[float] = mapped_column(Float, nullable=False)
     size_usd: Mapped[float] = mapped_column(Float, nullable=False)
-    token_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    token_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
 
     # Timing
     detected_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
@@ -182,8 +176,8 @@ class Signal(Base):
     latency_ms: Mapped[int] = mapped_column(Integer, nullable=False)
 
     # Relationships
-    run: Mapped[Optional["StrategyRun"]] = relationship(back_populates="signals")
-    decisions: Mapped[list["Decision"]] = relationship(back_populates="signal")
+    run: Mapped[StrategyRun | None] = relationship(back_populates="signals")
+    decisions: Mapped[list[Decision]] = relationship(back_populates="signal")
 
     __table_args__ = (
         Index("ix_signal_signal_id", "signal_id", unique=True),
@@ -197,12 +191,10 @@ class Decision(Base):
     __tablename__ = "decisions"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    run_id: Mapped[Optional[int]] = mapped_column(
+    run_id: Mapped[int | None] = mapped_column(
         BigInteger, ForeignKey("strategy_runs.id"), nullable=True
     )
-    signal_id: Mapped[int] = mapped_column(
-        BigInteger, ForeignKey("signals.id"), nullable=False
-    )
+    signal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("signals.id"), nullable=False)
 
     # Strategy info at decision time
     strategy_id: Mapped[int] = mapped_column(
@@ -218,18 +210,16 @@ class Decision(Base):
     expected_slippage_bps: Mapped[float] = mapped_column(Float, default=0.0)
 
     # Computed values at decision time
-    edge_bps: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    edge_bps: Mapped[float | None] = mapped_column(Float, nullable=True)
     computed_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     # Relationships
-    run: Mapped[Optional["StrategyRun"]] = relationship(back_populates="decisions")
-    signal: Mapped["Signal"] = relationship(back_populates="decisions")
-    strategy: Mapped["Strategy"] = relationship()
-    fill: Mapped[Optional["Fill"]] = relationship(back_populates="decision")
+    run: Mapped[StrategyRun | None] = relationship(back_populates="decisions")
+    signal: Mapped[Signal] = relationship(back_populates="decisions")
+    strategy: Mapped[Strategy] = relationship()
+    fill: Mapped[Fill | None] = relationship(back_populates="decision")
 
-    __table_args__ = (
-        Index("ix_decision_signal_strategy", "signal_id", "strategy_id"),
-    )
+    __table_args__ = (Index("ix_decision_signal_strategy", "signal_id", "strategy_id"),)
 
 
 class Fill(Base):
@@ -253,7 +243,7 @@ class Fill(Base):
     fee_usd: Mapped[float] = mapped_column(Float, nullable=False)
     pnl_usd: Mapped[float] = mapped_column(Float, nullable=False)
     markout: Mapped[float] = mapped_column(Float, nullable=False)
-    realized_pnl: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    realized_pnl: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     # Timing
     latency_ms: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -261,8 +251,8 @@ class Fill(Base):
     mode: Mapped[str] = mapped_column(String(20), default="backtest")
 
     # Relationships
-    decision: Mapped["Decision"] = relationship(back_populates="fill")
-    equity_points: Mapped[list["EquityPoint"]] = relationship(back_populates="fill")
+    decision: Mapped[Decision] = relationship(back_populates="fill")
+    equity_points: Mapped[list[EquityPoint]] = relationship(back_populates="fill")
 
     __table_args__ = (
         Index("ix_fill_filled_at", "filled_at"),
@@ -276,9 +266,7 @@ class EquityPoint(Base):
     __tablename__ = "equity_points"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    fill_id: Mapped[Optional[int]] = mapped_column(
-        BigInteger, ForeignKey("fills.id"), nullable=True
-    )
+    fill_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("fills.id"), nullable=True)
 
     timestamp: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     balance_usd: Mapped[float] = mapped_column(Float, nullable=False)
@@ -286,8 +274,6 @@ class EquityPoint(Base):
     drawdown_pct: Mapped[float] = mapped_column(Float, nullable=False)
 
     # Relationships
-    fill: Mapped[Optional["Fill"]] = relationship(back_populates="equity_points")
+    fill: Mapped[Fill | None] = relationship(back_populates="equity_points")
 
-    __table_args__ = (
-        Index("ix_equity_timestamp", "timestamp"),
-    )
+    __table_args__ = (Index("ix_equity_timestamp", "timestamp"),)

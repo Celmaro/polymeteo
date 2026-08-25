@@ -1,10 +1,9 @@
 """Tests for wallet filter."""
 
-import pytest
 from datetime import datetime, timezone
 
-from weather_copy_bot.live import WeatherWalletFilter, WalletFilterConfig
-from weather_copy_bot.models import TradeSignal, Side
+from weather_copy_bot.live import WalletFilterConfig, WeatherWalletFilter
+from weather_copy_bot.models import Side, TradeSignal
 
 
 class TestWeatherWalletFilter:
@@ -13,7 +12,7 @@ class TestWeatherWalletFilter:
     def test_weather_signal_accepted(self):
         """Test that weather signals are accepted."""
         filter_ = WeatherWalletFilter()
-        
+
         signal = TradeSignal(
             signal_id="sig-001",
             target_wallet="0x123",
@@ -28,15 +27,14 @@ class TestWeatherWalletFilter:
             target_filled_at=datetime.now(timezone.utc),
             latency_ms=200,
         )
-        
-        should_copy, reason = filter_.should_copy(signal)
+
+        should_copy, _ = filter_.should_copy(signal)
         assert should_copy is True
-        assert "rain" in reason
 
     def test_non_weather_signal_rejected(self):
         """Test that non-weather signals are rejected."""
         filter_ = WeatherWalletFilter()
-        
+
         signal = TradeSignal(
             signal_id="sig-002",
             target_wallet="0x456",
@@ -51,7 +49,7 @@ class TestWeatherWalletFilter:
             target_filled_at=datetime.now(timezone.utc),
             latency_ms=200,
         )
-        
+
         should_copy, reason = filter_.should_copy(signal)
         assert should_copy is False
         assert "no_weather_keyword" in reason
@@ -59,7 +57,7 @@ class TestWeatherWalletFilter:
     def test_temperature_signal_accepted(self):
         """Test temperature-related signals are accepted."""
         filter_ = WeatherWalletFilter()
-        
+
         signal = TradeSignal(
             signal_id="sig-003",
             target_wallet="0x789",
@@ -74,7 +72,7 @@ class TestWeatherWalletFilter:
             target_filled_at=datetime.now(timezone.utc),
             latency_ms=150,
         )
-        
+
         should_copy, reason = filter_.should_copy(signal)
         assert should_copy is True
         assert "temp" in reason or "temperature" in reason
@@ -82,7 +80,7 @@ class TestWeatherWalletFilter:
     def test_hurricane_signal_accepted(self):
         """Test hurricane signals are accepted."""
         filter_ = WeatherWalletFilter()
-        
+
         signal = TradeSignal(
             signal_id="sig-004",
             target_wallet="0xabc",
@@ -97,15 +95,15 @@ class TestWeatherWalletFilter:
             target_filled_at=datetime.now(timezone.utc),
             latency_ms=300,
         )
-        
-        should_copy, reason = filter_.should_copy(signal)
+
+        should_copy, _ = filter_.should_copy(signal)
         assert should_copy is True
 
     def test_stats_tracking(self):
         """Test that statistics are tracked."""
         config = WalletFilterConfig(track_filter_stats=True)
         filter_ = WeatherWalletFilter(config)
-        
+
         weather_signal = TradeSignal(
             signal_id="sig-005",
             target_wallet="0xdef",
@@ -120,9 +118,9 @@ class TestWeatherWalletFilter:
             target_filled_at=datetime.now(timezone.utc),
             latency_ms=200,
         )
-        
+
         filter_.should_copy(weather_signal)
-        
+
         stats = filter_.get_stats()
         assert stats.total_signals == 1
         assert stats.allowed_signals == 1

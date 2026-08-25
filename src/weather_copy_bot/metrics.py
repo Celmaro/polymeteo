@@ -41,6 +41,24 @@ def max_drawdown_pct(equity: Sequence[float]) -> float:
     return float(abs(dd.min()) * 100.0)
 
 
+def calculate_max_drawdown(equity_points: Sequence[EquityPoint]) -> float:
+    if not equity_points:
+        return 0.0
+    equity = [p.equity_usd for p in equity_points]
+    return max_drawdown_pct(equity)
+
+
+def calculate_sharpe(fills: Iterable[Fill], starting_balance: float) -> float:
+    if not fills:
+        return 0.0
+    equity = [starting_balance]
+    cumulative = starting_balance
+    for f in fills:
+        cumulative += f.pnl_usd
+        equity.append(cumulative)
+    return sharpe_ratio(equity)
+
+
 def profit_factor(fills: Iterable[Fill]) -> float:
     gains = sum(f.pnl_usd for f in fills if f.pnl_usd > 0)
     losses = abs(sum(f.pnl_usd for f in fills if f.pnl_usd < 0))

@@ -15,14 +15,14 @@ class TestKellyCalculator:
     def test_positive_edge(self):
         """Test with positive expected value."""
         calc = KellyCalculator()
-        
+
         result = calc.calculate(
             win_rate=0.55,
             avg_win=100.0,
             avg_loss=90.0,
             max_position=250.0,
         )
-        
+
         assert result.kelly_fraction > 0
         assert result.adjusted_size > 0
         assert result.reason == "kelly"
@@ -30,14 +30,14 @@ class TestKellyCalculator:
     def test_negative_edge(self):
         """Test with negative expected value."""
         calc = KellyCalculator()
-        
+
         result = calc.calculate(
             win_rate=0.40,
             avg_win=100.0,
             avg_loss=90.0,
             max_position=250.0,
         )
-        
+
         assert result.kelly_fraction == 0
         assert result.adjusted_size == 0
 
@@ -45,34 +45,34 @@ class TestKellyCalculator:
         """Test that half-Kelly reduces size."""
         calc_full = KellyCalculator(KellyConfig(use_half_kelly=False))
         calc_half = KellyCalculator(KellyConfig(use_half_kelly=True))
-        
+
         result_full = calc_full.calculate(win_rate=0.55, avg_win=100.0, avg_loss=90.0)
         result_half = calc_half.calculate(win_rate=0.55, avg_win=100.0, avg_loss=90.0)
-        
+
         assert result_half.kelly_fraction < result_full.kelly_fraction
 
     def test_max_kelly_limit(self):
         """Test that max Kelly fraction is enforced."""
         config = KellyConfig(max_kelly_fraction=0.10)
         calc = KellyCalculator(config)
-        
+
         result = calc.calculate(
             win_rate=0.70,
             avg_win=200.0,
             avg_loss=100.0,
             max_position=250.0,
         )
-        
+
         assert result.kelly_fraction <= 0.10
 
     def test_invalid_win_rate(self):
         """Test handling of invalid win rate."""
         calc = KellyCalculator()
-        
+
         # Win rate of 0
         result = calc.calculate(win_rate=0.0, avg_win=100.0, avg_loss=90.0)
         assert result.reason == "invalid_win_rate"
-        
+
         # Win rate of 1
         result = calc.calculate(win_rate=1.0, avg_win=100.0, avg_loss=90.0)
         assert result.reason == "invalid_win_rate"
@@ -80,13 +80,13 @@ class TestKellyCalculator:
     def test_expected_value_calculation(self):
         """Test expected value is calculated correctly."""
         calc = KellyCalculator()
-        
+
         result = calc.calculate(
             win_rate=0.60,
             avg_win=50.0,
             avg_loss=50.0,
         )
-        
+
         # EV = 0.6 * 50 - 0.4 * 50 = 30 - 20 = 10
         assert result.expected_value == 10.0
 

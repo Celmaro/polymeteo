@@ -28,7 +28,9 @@ console = Console()
 
 
 @app.command("dashboard-data")
-def dashboard_data(export: bool = typer.Option(True, help="Write data/demo/dashboard.json")) -> None:
+def dashboard_data(
+    export: bool = typer.Option(True, help="Write data/demo/dashboard.json"),
+) -> None:
     """Generate curated dashboard demo metrics."""
     path = export_demo_json() if export else None
     payload = load_dashboard_payload()

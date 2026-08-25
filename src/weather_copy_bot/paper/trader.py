@@ -7,7 +7,14 @@ from dataclasses import dataclass, field
 from weather_copy_bot.backtest.engine import CopyBacktester
 from weather_copy_bot.config import Settings, get_settings
 from weather_copy_bot.metrics import summarize_fills
-from weather_copy_bot.models import CopyDecision, EquityPoint, Fill, PerformanceSummary, Side, TradeSignal
+from weather_copy_bot.models import (
+    CopyDecision,
+    EquityPoint,
+    Fill,
+    PerformanceSummary,
+    Side,
+    TradeSignal,
+)
 
 
 @dataclass

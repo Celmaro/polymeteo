@@ -1,10 +1,9 @@
 """Tests for CopyBacktester."""
 
-import pytest
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 
 from weather_copy_bot.backtest import CopyBacktester
-from weather_copy_bot.models import TradeSignal, Side
+from weather_copy_bot.models import Side, TradeSignal
 
 
 class TestCopyBacktester:
@@ -13,7 +12,7 @@ class TestCopyBacktester:
     def test_decide_stale_signal(self):
         """Test that stale signals are rejected."""
         backtester = CopyBacktester()
-        
+
         signal = TradeSignal(
             signal_id="sig-001",
             target_wallet="0x123",
@@ -25,7 +24,7 @@ class TestCopyBacktester:
             target_filled_at=datetime.now(timezone.utc),
             latency_ms=1500,  # > 800ms max
         )
-        
+
         decision = backtester.decide(signal)
         assert decision.should_copy is False
         assert "stale" in decision.reason
@@ -33,7 +32,7 @@ class TestCopyBacktester:
     def test_decide_size_too_small(self):
         """Test that tiny positions are rejected."""
         backtester = CopyBacktester()
-        
+
         signal = TradeSignal(
             signal_id="sig-002",
             target_wallet="0x123",
@@ -45,7 +44,7 @@ class TestCopyBacktester:
             target_filled_at=datetime.now(timezone.utc),
             latency_ms=100,
         )
-        
+
         decision = backtester.decide(signal)
         assert decision.should_copy is False
         assert "size" in decision.reason
@@ -53,7 +52,7 @@ class TestCopyBacktester:
     def test_decide_valid_signal(self):
         """Test valid signal is accepted."""
         backtester = CopyBacktester()
-        
+
         signal = TradeSignal(
             signal_id="sig-003",
             target_wallet="0x456",
@@ -65,7 +64,7 @@ class TestCopyBacktester:
             target_filled_at=datetime.now(timezone.utc),
             latency_ms=200,
         )
-        
+
         decision = backtester.decide(signal)
         assert decision.should_copy is True
         assert decision.copy_size_usd > 0
@@ -74,14 +73,14 @@ class TestCopyBacktester:
         """Test running backtest with no signals."""
         backtester = CopyBacktester()
         result = backtester.run([])
-        
+
         assert result.summary.trade_count == 0
         assert result.summary.total_pnl == 0.0
 
     def test_run_with_signals(self):
         """Test running backtest with signals."""
         backtester = CopyBacktester()
-        
+
         signals = [
             TradeSignal(
                 signal_id=f"sig-{i:03d}",
@@ -96,7 +95,7 @@ class TestCopyBacktester:
             )
             for i in range(5)
         ]
-        
+
         result = backtester.run(signals)
         assert result.summary.trade_count >= 0
         assert len(result.equity_curve) >= 0

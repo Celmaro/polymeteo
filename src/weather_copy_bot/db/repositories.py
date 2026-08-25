@@ -2,15 +2,13 @@
 
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Optional
+from datetime import datetime, timezone
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from weather_copy_bot.db.models import (
     Decision,
-    EquityPoint,
     Fill,
     Signal,
     Strategy,
@@ -32,19 +30,17 @@ class StrategyRepository:
         self.session.flush()
         return strategy
 
-    def get_by_id(self, strategy_id: int) -> Optional[Strategy]:
+    def get_by_id(self, strategy_id: int) -> Strategy | None:
         """Get strategy by ID."""
         return self.session.get(Strategy, strategy_id)
 
-    def get_by_name_version(
-        self, name: str, version: Optional[int] = None
-    ) -> Optional[Strategy]:
+    def get_by_name_version(self, name: str, version: int | None = None) -> Strategy | None:
         """Get strategy by name and optional version."""
         query = select(Strategy).where(Strategy.name == name)
         if version:
             query = query.where(Strategy.version == version)
         else:
-            query = query.where(Strategy.is_active == True)
+            query = query.where(Strategy.is_active.is_(True))
             query = query.order_by(Strategy.version.desc())
         result = self.session.execute(query)
         return result.scalar_one_or_none()
@@ -53,22 +49,20 @@ class StrategyRepository:
         """Get all active strategies."""
         query = (
             select(Strategy)
-            .where(Strategy.is_active == True)
+            .where(Strategy.is_active.is_(True))
             .order_by(Strategy.name, Strategy.version.desc())
         )
         result = self.session.execute(query)
         return list(result.scalars().all())
 
-    def deactivate(self, strategy_id: int) -> Optional[Strategy]:
+    def deactivate(self, strategy_id: int) -> Strategy | None:
         """Deactivate a strategy."""
         strategy = self.session.get(Strategy, strategy_id)
         if strategy:
             strategy.is_active = False
         return strategy
 
-    def create_new_version(
-        self, base_strategy_id: int, **updates
-    ) -> Strategy:
+    def create_new_version(self, base_strategy_id: int, **updates) -> Strategy:
         """Create a new version of a strategy with updated params."""
         base = self.session.get(Strategy, base_strategy_id)
         if not base:
@@ -79,20 +73,12 @@ class StrategyRepository:
             version=base.version + 1,
             description=updates.get("description"),
             copy_ratio=updates.get("copy_ratio", base.copy_ratio),
-            max_position_usd=updates.get(
-                "max_position_usd", base.max_position_usd
-            ),
-            max_daily_loss_usd=updates.get(
-                "max_daily_loss_usd", base.max_daily_loss_usd
-            ),
+            max_position_usd=updates.get("max_position_usd", base.max_position_usd),
+            max_daily_loss_usd=updates.get("max_daily_loss_usd", base.max_daily_loss_usd),
             min_edge_bps=updates.get("min_edge_bps", base.min_edge_bps),
-            max_copy_latency_ms=updates.get(
-                "max_copy_latency_ms", base.max_copy_latency_ms
-            ),
+            max_copy_latency_ms=updates.get("max_copy_latency_ms", base.max_copy_latency_ms),
             base_markout=updates.get("base_markout", base.base_markout),
-            latency_decay_rate=updates.get(
-                "latency_decay_rate", base.latency_decay_rate
-            ),
+            latency_decay_rate=updates.get("latency_decay_rate", base.latency_decay_rate),
             fee_rate=updates.get("fee_rate", base.fee_rate),
             params_json=updates.get("params_json"),
         )
@@ -114,7 +100,7 @@ class StrategyRunRepository:
         self.session.flush()
         return run
 
-    def get_by_id(self, run_id: int) -> Optional[StrategyRun]:
+    def get_by_id(self, run_id: int) -> StrategyRun | None:
         """Get run by ID."""
         return self.session.get(StrategyRun, run_id)
 
@@ -125,11 +111,11 @@ class StrategyRunRepository:
         total_pnl: float,
         trade_count: int,
         **metrics,
-    ) -> Optional[StrategyRun]:
+    ) -> StrategyRun | None:
         """Update run with performance metrics."""
         run = self.session.get(StrategyRun, run_id)
         if run:
-            run.ended_at = datetime.utcnow()
+            run.ended_at = datetime.now(timezone.utc)
             run.ending_balance = ending_balance
             run.total_pnl = total_pnl
             run.trade_count = trade_count
@@ -138,9 +124,7 @@ class StrategyRunRepository:
             run.max_drawdown_pct = metrics.get("max_drawdown_pct")
         return run
 
-    def get_by_strategy(
-        self, strategy_id: int, limit: int = 10
-    ) -> list[StrategyRun]:
+    def get_by_strategy(self, strategy_id: int, limit: int = 10) -> list[StrategyRun]:
         """Get recent runs for a strategy."""
         query = (
             select(StrategyRun)
@@ -165,7 +149,7 @@ class SignalRepository:
         self.session.flush()
         return signal
 
-    def get_by_signal_id(self, signal_id: str) -> Optional[Signal]:
+    def get_by_signal_id(self, signal_id: str) -> Signal | None:
         """Get signal by external signal_id."""
         query = select(Signal).where(Signal.signal_id == signal_id)
         result = self.session.execute(query)
@@ -192,9 +176,7 @@ class DecisionRepository:
         self.session.flush()
         return decision
 
-    def get_by_signal_and_strategy(
-        self, signal_id: int, strategy_id: int
-    ) -> Optional[Decision]:
+    def get_by_signal_and_strategy(self, signal_id: int, strategy_id: int) -> Decision | None:
         """Get decision for a specific signal and strategy."""
         query = select(Decision).where(
             Decision.signal_id == signal_id,
@@ -205,11 +187,7 @@ class DecisionRepository:
 
     def get_by_run(self, run_id: int) -> list[Decision]:
         """Get all decisions for a run."""
-        query = (
-            select(Decision)
-            .where(Decision.run_id == run_id)
-            .order_by(Decision.computed_at)
-        )
+        query = select(Decision).where(Decision.run_id == run_id).order_by(Decision.computed_at)
         result = self.session.execute(query)
         return list(result.scalars().all())
 
@@ -230,17 +208,12 @@ class FillRepository:
     def get_by_run(self, run_id: int) -> list[Fill]:
         """Get all fills for a run."""
         query = (
-            select(Fill)
-            .join(Decision)
-            .where(Decision.run_id == run_id)
-            .order_by(Fill.filled_at)
+            select(Fill).join(Decision).where(Decision.run_id == run_id).order_by(Fill.filled_at)
         )
         result = self.session.execute(query)
         return list(result.scalars().all())
 
-    def get_stats_by_strategy(
-        self, strategy_id: int
-    ) -> dict:
+    def get_stats_by_strategy(self, strategy_id: int) -> dict:
         """Get aggregate stats for a strategy."""
         query = (
             select(
@@ -279,17 +252,11 @@ class TickRepository:
 
     def get_by_run(self, run_id: int) -> list[Tick]:
         """Get all ticks for a run, ordered by time."""
-        query = (
-            select(Tick)
-            .where(Tick.run_id == run_id)
-            .order_by(Tick.timestamp)
-        )
+        query = select(Tick).where(Tick.run_id == run_id).order_by(Tick.timestamp)
         result = self.session.execute(query)
         return list(result.scalars().all())
 
-    def get_market_ticks(
-        self, run_id: int, market_slug: str
-    ) -> list[Tick]:
+    def get_market_ticks(self, run_id: int, market_slug: str) -> list[Tick]:
         """Get ticks for a specific market."""
         query = (
             select(Tick)

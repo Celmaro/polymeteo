@@ -1,14 +1,15 @@
 """Tests for metrics module."""
 
-import pytest
 from datetime import datetime, timezone
 
+import pytest
+
 from weather_copy_bot.metrics import (
-    summarize_fills,
-    calculate_sharpe,
     calculate_max_drawdown,
+    calculate_sharpe,
+    summarize_fills,
 )
-from weather_copy_bot.models import Fill, EquityPoint, Side
+from weather_copy_bot.models import EquityPoint, Fill, Side
 
 
 class TestMetrics:
@@ -16,10 +17,10 @@ class TestMetrics:
 
     def test_summarize_empty_fills(self):
         """Test summarizing empty fill list."""
-        result = summarize_fills([], [], mode="backtest")
-        
+        result = summarize_fills([], [], mode="backtest", starting_balance=10000.0)
+
         assert result.trade_count == 0
-        assert result.total_pnl == 0.0
+        assert result.total_pnl_usd == 0.0
         assert result.win_rate == 0.0
 
     def test_summarize_winning_trades(self):
@@ -30,6 +31,9 @@ class TestMetrics:
                 signal_id=f"sig-{i}",
                 target_wallet="0x123",
                 market_slug="test",
+                market_title="Test Market",
+                city="Test City",
+                outcome="Yes",
                 side=Side.BUY,
                 price=0.50,
                 size_usd=100.0,
@@ -37,14 +41,15 @@ class TestMetrics:
                 pnl_usd=3.30,
                 latency_ms=200,
                 filled_at=datetime.now(timezone.utc),
+                mode="backtest",
             )
             for i in range(5)
         ]
-        
-        result = summarize_fills(fills, [], mode="backtest")
-        
+
+        result = summarize_fills(fills, [], mode="backtest", starting_balance=10000.0)
+
         assert result.trade_count == 5
-        assert result.total_pnl > 0
+        assert result.total_pnl_usd > 0
         assert result.win_rate == 100.0
 
     def test_sharpe_calculation(self):
@@ -55,6 +60,9 @@ class TestMetrics:
                 signal_id=f"sig-{i}",
                 target_wallet="0x123",
                 market_slug="test",
+                market_title="Test Market",
+                city="Test City",
+                outcome="Yes",
                 side=Side.BUY,
                 price=0.50,
                 size_usd=100.0,
@@ -62,10 +70,11 @@ class TestMetrics:
                 pnl_usd=2.0,
                 latency_ms=200,
                 filled_at=datetime.now(timezone.utc),
+                mode="backtest",
             )
             for i in range(10)
         ]
-        
+
         sharpe = calculate_sharpe(fills, starting_balance=10000.0)
         assert isinstance(sharpe, float)
 
@@ -91,6 +100,6 @@ class TestMetrics:
                 drawdown_pct=-6.67,
             ),
         ]
-        
+
         dd = calculate_max_drawdown(equity)
-        assert dd == pytest.approx(-6.67, rel=0.1)
+        assert dd == pytest.approx(6.67, rel=0.1)
