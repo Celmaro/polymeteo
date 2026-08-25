@@ -21,8 +21,16 @@ jobs:
 
       - name: Health check
         run: |
-          sleep 10
-          curl -f https://polymymeteo.zeabur.app/health || exit 1
+          for i in $(seq 1 30); do
+            if curl -fsS https://polymeteo.zeabur.app/api/health > /dev/null; then
+              echo "Service healthy (attempt $i)"
+              exit 0
+            fi
+            echo "Attempt $i not healthy yet, retrying in 10s..."
+            sleep 10
+          done
+          echo "Health check failed after 30 attempts"
+          exit 1
 
   notify:
     name: Notify
