@@ -20,8 +20,8 @@ strawberry-graphql[fastapi]>=0.220.0
 torch==2.4.1+cpu
 --index-url https://pypi.org/simple
 sentence-transformers==2.7.0
-duckdb>=0.9.0
-pyarrow>=14.0.0
+# TEMP COMMENTED OUT FOR TESTING: duckdb>=0.9.0
+# TEMP COMMENTED OUT FOR TESTING: pyarrow>=14.0.0
 
 # Dev/Test dependencies
 pytest>=8.0.0
