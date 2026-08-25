@@ -1,5 +1,6 @@
 """Configuration modules for polymeteo."""
 
+# BUILD_TIMESTAMP: 2026-08-25T06:50:00Z - force fresh Docker build
 from weather_copy_bot.config._settings import Settings, get_settings
 from weather_copy_bot.config.go_live import (
     DEPLOYMENT_PHASES,
