@@ -15,7 +15,6 @@ COPY src/ ./src/
 COPY scripts/ ./scripts/
 COPY data/ ./data/
 COPY dashboard/ ./dashboard/
-COPY package.json package-lock.json* ./
 
 WORKDIR /app/dashboard
 RUN npm ci && npm run build
