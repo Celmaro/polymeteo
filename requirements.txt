@@ -15,13 +15,12 @@ sqlalchemy>=2.0.0
 strawberry-graphql[fastapi]>=0.220.0
 
 # Optional ML/Analytics dependencies
-# PyTorch CPU-only (saves ~2GB build time) - Python 3.11 compatible
---extra-index-url https://download.pytorch.org/whl/cpu
+# NOTE: torch is installed separately in the Dockerfile (CPU-only, ~200MB).
+# Pinned here only so pip sees it as already installed.
 torch==2.4.1+cpu
---index-url https://pypi.org/simple
 sentence-transformers==2.7.0
-# TEMP COMMENTED OUT FOR TESTING: duckdb>=0.9.0
-# TEMP COMMENTED OUT FOR TESTING: pyarrow>=14.0.0
+duckdb>=0.9.0
+pyarrow>=14.0.0
 
 # Dev/Test dependencies
 pytest>=8.0.0
