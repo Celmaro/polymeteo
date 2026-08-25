@@ -55,6 +55,12 @@ class QueuedOrder:
     priority: int = 0  # Higher = more priority
     added_at: float = field(default_factory=time.time)
 
+    def __lt__(self, other: "QueuedOrder") -> bool:
+        """Max-heap ordering by priority, FIFO within equal priority."""
+        if self.priority != other.priority:
+            return self.priority > other.priority
+        return self.added_at < other.added_at
+
 
 class OrderQueue:
     """
@@ -154,6 +160,7 @@ class OrderQueue:
             self._submit_count = 0
 
         if self._submit_count >= self.rate_limit:
+            self._stats["rate_limited"] += 1
             return False
 
         self._submit_count += 1
@@ -222,13 +229,11 @@ class OrderQueue:
 
         Returns True if submitted successfully.
         """
-        order = self._active_orders.get(order_id)
-        if not order:
+        if not await self._check_rate_limit():
             return False
 
-        # Rate limit check
-        if not await self._check_rate_limit():
-            self._stats["rate_limited"] += 1
+        order = self._active_orders.get(order_id)
+        if not order:
             return False
 
         # Get state lock

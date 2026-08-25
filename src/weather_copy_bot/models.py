@@ -108,6 +108,17 @@ class PerformanceSummary(BaseModel):
     avg_copy_edge_bps: float
 
 
+class BacktestResult(BaseModel):
+    """Aggregated output of a backtest run."""
+
+    model_config = ConfigDict(extra="ignore", frozen=False)
+
+    summary: PerformanceSummary
+    fills: list[Fill] = Field(default_factory=list)
+    equity_curve: list[EquityPoint] = Field(default_factory=list)
+    decisions: list[CopyDecision] = Field(default_factory=list)
+
+
 class CityBreakdown(BaseModel):
     model_config = ConfigDict(extra="ignore", frozen=True)
 

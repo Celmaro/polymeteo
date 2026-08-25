@@ -14,6 +14,7 @@ class TelegramConfig(BaseModel):
     """Telegram bot configuration."""
 
     bot_token: str
+    default_chat_id: int | None = None  # Fallback destination for notifications
     allowed_users: list[int] = []  # Telegram user IDs
     admin_user_ids: list[int] = []  # Users with admin privileges
     commands: list[str] = ["start", "stop", "status", "pnl", "positions", "wallets", "help"]
@@ -78,10 +79,24 @@ class TelegramBot:
         logger.info("Telegram bot stopped")
 
     async def send_message(self, text: str, chat_id: int | None = None) -> bool:
-        """Send a message to a chat."""
-        # In production, this would use python-telegram-bot or httpx
-        logger.info(f"Telegram message: {text[:100]}")
-        return True
+        """Send a message via the real Telegram transport.
+
+        Returns False (instead of pretending success) when no token or
+        destination chat is configured.
+        """
+        if not self.config.bot_token:
+            logger.warning("Telegram bot_token not configured; message not sent")
+            return False
+
+        target = chat_id or self.config.default_chat_id
+        if target is None:
+            logger.warning(
+                "No chat_id provided and no default_chat_id configured; "
+                "message not sent"
+            )
+            return False
+
+        return await send_telegram_message(self.config.bot_token, target, text)
 
     async def send_notification(
         self,

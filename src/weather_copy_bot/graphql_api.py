@@ -5,6 +5,7 @@ from datetime import datetime
 from enum import Enum
 
 import strawberry
+from graphql import GraphQLError
 
 
 @strawberry.enum
@@ -97,13 +98,9 @@ class Mutation:
         position_size: float,
         wallet_address: str
     ) -> WalletPosition:
-        return WalletPosition(
-            wallet_address=wallet_address,
-            market_id=market_id,
-            position_size=position_size,
-            entry_price=0.5,
-            current_pnl=0.0,
-            unrealized_pnl=0.0,
+        raise GraphQLError(
+            "copyTrade is not wired to live execution yet; refusing to "
+            "fabricate a position"
         )
 
     @strawberry.mutation
@@ -112,13 +109,9 @@ class Mutation:
         market_id: str,
         wallet_address: str
     ) -> WalletPosition:
-        return WalletPosition(
-            wallet_address=wallet_address,
-            market_id=market_id,
-            position_size=0.0,
-            entry_price=0.0,
-            current_pnl=0.0,
-            unrealized_pnl=0.0,
+        raise GraphQLError(
+            "closePosition is not wired to live execution yet; refusing to "
+            "fabricate a position"
         )
 
 

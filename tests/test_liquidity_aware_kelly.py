@@ -1,8 +1,6 @@
 """Tests for liquidity-aware Kelly sizing module."""
 from __future__ import annotations
 
-import pytest
-
 from weather_copy_bot.liquidity_aware_kelly import (
     KellyParams,
     LiquidityAwareKellySizer,

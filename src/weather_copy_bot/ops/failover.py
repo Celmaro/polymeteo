@@ -12,6 +12,9 @@ from contextlib import suppress
 from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any
+from urllib.parse import ParseResult, urlparse
+
+import httpx
 
 if TYPE_CHECKING:
     pass
@@ -104,6 +107,7 @@ class FailoverManager:
         # State
         self._running = False
         self._health_check_task: asyncio.Task | None = None
+        self._transport: httpx.AsyncBaseTransport | None = None
 
         # Lock for thread safety
         self._lock = asyncio.Lock()
@@ -290,11 +294,19 @@ class FailoverManager:
 
             # Perform health check (ping)
             try:
+                started = time.perf_counter()
                 is_healthy = await self._ping_endpoint(service, endpoint)
+                elapsed_ms = (time.perf_counter() - started) * 1000
 
                 if is_healthy:
                     health.is_healthy = True
                     health.consecutive_failures = 0
+                    health.last_check = time.time()
+                    health.avg_latency_ms = (
+                        elapsed_ms
+                        if health.avg_latency_ms == 0
+                        else health.avg_latency_ms * 0.7 + elapsed_ms * 0.3
+                    )
                 else:
                     health.consecutive_failures += 1
                     if health.consecutive_failures >= self.max_failures:
@@ -302,7 +314,7 @@ class FailoverManager:
 
                 results[endpoint.name] = {
                     "status": "healthy" if is_healthy else "unhealthy",
-                    "latency_ms": health.avg_latency_ms,
+                    "latency_ms": round(elapsed_ms, 2),
                     "failures": health.consecutive_failures,
                 }
 
@@ -317,15 +329,50 @@ class FailoverManager:
         service: ServiceType,
         endpoint: EndpointConfig,
     ) -> bool:
-        """Ping an endpoint to check health."""
-        # This would integrate with actual HTTP client
-        # For now, return True (mock)
-        try:
-            # Simulate ping
-            await asyncio.sleep(0.01)
+        """Ping an endpoint with a real network probe."""
+        timeout_s = endpoint.timeout_ms / 1000
+        parsed = urlparse(endpoint.url)
+        scheme = parsed.scheme.lower()
+
+        if scheme in ("sqlite", ""):
+            # File-backed/local stores are reachable in-process by definition
             return True
-        except Exception:
+
+        try:
+            if service in (ServiceType.DATABASE, ServiceType.REDIS):
+                return await self._tcp_ping(parsed, timeout_s)
+            return await self._http_ping(endpoint.url, timeout_s)
+        except Exception as e:
+            logger.debug(f"[FAILOVER] Probe failed for {endpoint.name}: {e}")
             return False
+
+    async def _http_ping(self, url: str, timeout_s: float) -> bool:
+        """HTTP liveness probe; any non-5xx response counts as up."""
+        async with httpx.AsyncClient(
+            transport=self._transport,
+            timeout=timeout_s,
+            follow_redirects=True,
+        ) as client:
+            response = await client.get(url)
+            return response.status_code < 500
+
+    async def _tcp_ping(self, parsed: ParseResult, timeout_s: float) -> bool:
+        """TCP reachability probe for non-HTTP services (DB/Redis)."""
+        host = parsed.hostname
+        if not host:
+            return False
+        default_ports = {
+            "redis": 6379,
+            "rediss": 6379,
+            "postgres": 5432,
+            "postgresql": 5432,
+        }
+        port = parsed.port or default_ports.get(parsed.scheme.lower(), 443)
+        _, writer = await asyncio.wait_for(
+            asyncio.open_connection(host, port), timeout=timeout_s
+        )
+        writer.close()
+        return True
 
     async def start_health_checks(self) -> None:
         """Start periodic health checks."""

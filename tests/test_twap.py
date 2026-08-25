@@ -1,6 +1,6 @@
 """Tests for TWAP Slicer."""
 
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -207,8 +207,8 @@ class TestTWAPIntegration:
         twap = TWAPSlicer(
             slice_interval_seconds=0.01,
         )
-        risk = AsyncMock()
-        risk.check_size_limits.return_value = AsyncMock(passed=True)
+        risk = MagicMock()
+        risk.check_size_limits.return_value = MagicMock(passed=True)
 
         integration = TWAPIntegration(
             twap_slicer=twap,

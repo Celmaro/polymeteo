@@ -186,7 +186,8 @@ class TestOrderQueue:
         """Test statistics tracking."""
         await queue.enqueue("T1", "BUY", 100.0, 0.50)
         await queue.enqueue("T2", "BUY", 100.0, 0.50)
-        await queue.enqueue("T3", "BUY", 100.0, 0.50)  # Duplicate
+        await queue.enqueue("T3", "BUY", 100.0, 0.50)
+        await queue.enqueue("T1", "BUY", 100.0, 0.50)  # Duplicate
 
         stats = queue.get_stats()
         assert stats["orders_queued"] == 3

@@ -131,7 +131,7 @@ class CopyBacktester:
 
         # Edge calculation
         edge_bps = abs(0.5 - signal.price) * 10_000 * 0.15
-        if edge_bps < p.min_edge_bps and signal.price > 0.85:
+        if edge_bps < p.min_edge_bps:
             return CopyDecision(signal=signal, should_copy=False, reason="thin_edge")
 
         # Slippage estimate

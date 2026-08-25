@@ -8,6 +8,7 @@ import asyncio
 import logging
 import time
 from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from uuid import uuid4
@@ -72,6 +73,7 @@ class QuorumEngine:
         window_seconds: int = 600,  # 10 minutes
         max_acceptable_price: float = 0.85,
         max_slippage_bps: int = 50,  # 0.5%
+        clock: Callable[[], float] | None = None,
     ):
         """
         Initialize QuorumEngine.
@@ -82,12 +84,15 @@ class QuorumEngine:
             window_seconds: Time window for signal aggregation
             max_acceptable_price: Don't execute if price above this
             max_slippage_bps: Max acceptable slippage in basis points
+            clock: Time source; defaults to wall clock. Injectable so the
+                backtester can replay historical timestamps.
         """
         self.min_quorum_count = min_quorum_count
         self.min_weighted_score = min_weighted_score
         self.window_seconds = window_seconds
         self.max_acceptable_price = max_acceptable_price
         self.max_slippage_bps = max_slippage_bps
+        self._clock = clock or time.time
 
         # Signal buffer: {(token_id, side): [WalletTradeSignal, ...]}
         self._buffer: dict[str, list[WalletTradeSignal]] = defaultdict(list)
@@ -96,14 +101,7 @@ class QuorumEngine:
         self._executed: set[str] = set()
 
         # Stats
-        self._stats = {
-            "signals_received": 0,
-            "signals_buffered": 0,
-            "signals_expired": 0,
-            "quorum_reached": 0,
-            "quorum_rejected": 0,
-            "duplicate_signals": 0,
-        }
+        self._stats = self._empty_stats()
 
     def _make_key(self, token_id: str, side: str) -> str:
         """Create buffer key."""
@@ -135,7 +133,7 @@ class QuorumEngine:
             QuorumResult if quorum is reached, None otherwise
         """
         self._stats["signals_received"] += 1
-        current_time = time.time()
+        current_time = self._clock()
 
         key = self._make_key(signal.token_id, signal.side)
 
@@ -235,10 +233,23 @@ class QuorumEngine:
             else self.window_seconds,
         }
 
+    @staticmethod
+    def _empty_stats() -> dict:
+        """Zeroed statistics shared by __init__ and reset."""
+        return {
+            "signals_received": 0,
+            "signals_buffered": 0,
+            "signals_expired": 0,
+            "quorum_reached": 0,
+            "quorum_rejected": 0,
+            "duplicate_signals": 0,
+        }
+
     def reset(self) -> None:
         """Reset the engine state."""
         self._buffer.clear()
         self._executed.clear()
+        self._stats = self._empty_stats()
         logger.info("[Quorum] Engine reset")
 
     def get_stats(self) -> dict:

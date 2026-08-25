@@ -66,3 +66,36 @@ class TestRootEndpoint:
         client = TestClient(app, raise_server_exceptions=False)
         response = client.get("/")
         assert response.status_code in [200, 404]
+
+
+class TestRoutePrecedence:
+    """API routes must take precedence over the catch-all dashboard mount (C-2)."""
+
+    def test_api_routes_take_precedence_over_dashboard_mount(self, monkeypatch, tmp_path):
+        dist = tmp_path / "dashboard" / "dist"
+        dist.mkdir(parents=True)
+        (dist / "index.html").write_text("<html><body>polymeteo-dashboard</body></html>")
+        monkeypatch.setenv("APP_ROOT", str(tmp_path))
+
+        from weather_copy_bot.api.app import create_app
+
+        application = create_app()
+        client = TestClient(application)
+
+        assert client.get("/api/health").status_code == 200
+        assert client.get("/api/dashboard").status_code == 200
+
+        root = client.get("/")
+        assert root.status_code == 200
+        assert "polymeteo-dashboard" in root.text
+
+    def test_create_app_without_dist_serves_no_mount(self, monkeypatch, tmp_path):
+        empty_root = tmp_path / "empty"
+        empty_root.mkdir()
+        monkeypatch.setenv("APP_ROOT", str(empty_root))
+
+        from weather_copy_bot.api.app import create_app
+
+        application = create_app()
+        client = TestClient(application)
+        assert client.get("/api/health").status_code == 200

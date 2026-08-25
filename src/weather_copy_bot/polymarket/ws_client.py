@@ -221,7 +221,7 @@ class CLOBWebSocket:
         except json.JSONDecodeError:
             logger.warning(f"Invalid JSON: {raw[:100]}")
         except Exception as e:
-            logger.error(f"Error handling message: {e}")
+            logger.exception("Error handling message")
             if self._on_error:
                 await self._on_error(e)
 
@@ -325,8 +325,10 @@ class CLOBWebSocket:
         while self._running and self._ws:
             with suppress(websockets.ConnectionClosed):
                 async for raw in self._ws:
-                    with suppress(Exception):
+                    try:
                         await self._handle_message(raw)
+                    except Exception:
+                        logger.exception("Unhandled error processing WebSocket message")
             if self._running:
                 logger.warning("Connection closed, reconnecting...")
                 await asyncio.sleep(5)

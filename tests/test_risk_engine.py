@@ -238,3 +238,36 @@ class TestLiquidityChecker:
 
         assert slippage > 0
         assert slippage < 100  # Should be reasonable
+
+
+class TestCheckSizeLimits:
+    """Tests for RiskEngine.check_size_limits (TWAP integration contract)."""
+
+    def test_size_within_bounds_passes(self):
+        engine = RiskEngine()
+        check = engine.check_size_limits(50.0)
+        assert check.passed is True
+        assert check.rejected is False
+
+    def test_size_below_minimum_rejected(self):
+        engine = RiskEngine(limits=RiskLimits(min_trade_size_usd=5.0))
+        check = engine.check_size_limits(2.0)
+        assert check.passed is False
+        assert check.rejected is True
+        assert "min_trade" in check.reason
+
+    def test_size_above_maximum_rejected(self):
+        engine = RiskEngine(limits=RiskLimits(max_trade_size_usd=100.0))
+        check = engine.check_size_limits(150.0)
+        assert check.passed is False
+        assert check.rejected is True
+        assert "max_trade" in check.reason
+
+    def test_size_above_position_cap_rejected(self):
+        engine = RiskEngine(
+            limits=RiskLimits(max_position_usd=250.0, max_trade_size_usd=400.0)
+        )
+        check = engine.check_size_limits(300.0)
+        assert check.passed is False
+        assert check.rejected is True
+        assert "max_position" in check.reason

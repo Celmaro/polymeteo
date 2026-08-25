@@ -1,8 +1,6 @@
 """Tests for market classifier module."""
 from __future__ import annotations
 
-import pytest
-
 from weather_copy_bot.market_classifier import (
     MarketCategory,
     MarketClassification,

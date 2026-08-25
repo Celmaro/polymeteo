@@ -176,11 +176,13 @@ class EmergencyShutdown:
 
             # Get current state
             balance = 0.0
-            try:
-                if self._get_balance_fn:
+            if self._get_balance_fn:
+                try:
                     balance = await self._get_balance_fn()
-            except Exception:
-                pass
+                except Exception as e:
+                    logger.warning(
+                        f"[SHUTDOWN] Failed to fetch balance before shutdown: {e}"
+                    )
 
             # Step 1: Cancel pending orders
             pending_cancelled = 0
@@ -194,23 +196,44 @@ class EmergencyShutdown:
                 except Exception as e:
                     logger.error(f"[SHUTDOWN] Error cancelling orders: {e}")
 
-            # Step 2: Close positions
+            # Step 2: Close positions, isolating failures so one bad close
+            # cannot abort the remaining liquidations
             positions_closed = 0
+            position_failures: list[str] = []
             if self._executor and self._get_positions_fn:
                 try:
                     positions = await self._get_positions_fn()
-                    for pos in positions:
-                        await self._executor.close_position(pos.get("position_id"))
-                        positions_closed += 1
-                    logger.info(f"[SHUTDOWN] Closed {positions_closed} positions")
                 except Exception as e:
-                    logger.error(f"[SHUTDOWN] Error closing positions: {e}")
+                    logger.error(f"[SHUTDOWN] Error fetching positions: {e}")
+                    positions = []
+                for pos in positions:
+                    position_id = pos.get("position_id") if isinstance(pos, dict) else pos
+                    try:
+                        await self._executor.close_position(position_id)
+                        positions_closed += 1
+                    except Exception as e:
+                        logger.error(f"[SHUTDOWN] Failed to close position {position_id}: {e}")
+                        position_failures.append(f"{position_id}: {e}")
+                logger.info(
+                    f"[SHUTDOWN] Closed {positions_closed} positions "
+                    f"({len(position_failures)} failures)"
+                )
 
-            # Step 3: Create event
+            # Step 3: Create event (append close failures so they reach the
+            # log, the persisted event, and the alert)
+            full_details = details
+            if position_failures:
+                failure_summary = "; ".join(position_failures)
+                full_details = (
+                    f"{details} | failed closes: {failure_summary}"
+                    if details
+                    else f"failed closes: {failure_summary}"
+                )
+
             event = ShutdownEvent(
                 reason=reason,
                 timestamp=time.time(),
-                details=details,
+                details=full_details,
                 positions_closed=positions_closed,
                 pending_orders_cancelled=pending_cancelled,
                 balance_at_shutdown=balance,
@@ -224,7 +247,7 @@ class EmergencyShutdown:
                     await self._notifier.send_emergency_alert(
                         title=f"🔴 EMERGENCY SHUTDOWN: {reason.value}",
                         message=f"""
-Details: {details}
+Details: {full_details}
 Balance: ${balance:.2f}
 Daily P&L: ${self._daily_loss:.2f}
 Positions closed: {positions_closed}

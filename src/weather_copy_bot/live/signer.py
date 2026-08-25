@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 
 import httpx
@@ -107,7 +108,15 @@ class EIP712Signer:
     ):
         self.private_key = private_key
         self._account = self._init_account(private_key)
-        self._address = account_address or self._account.address
+        if account_address:
+            self._address = account_address
+        elif self._account is not None:
+            self._address = self._account.address
+        else:
+            raise RuntimeError(
+                "eth-account backend unavailable; provide account_address "
+                "explicitly to construct a signer"
+            )
 
     def _init_account(self, private_key: str):
         """Initialize web3 account."""
@@ -135,21 +144,27 @@ class EIP712Signer:
             SignedOrder with signature
         """
         if self._account is None:
-            # Fallback: mock signature for testing
-            logger.warning("Using mock signature (eth-account not available)")
-            return SignedOrder(
-                order=order,
-                signature="0x" + "00" * 65,
-                signer=self._address,
+            # Fail closed: an unsigned/mock signature would be rejected by
+            # the exchange anyway, so refuse loudly instead of masking a
+            # broken key setup.
+            raise RuntimeError(
+                "No signing backend available (eth-account not installed or "
+                "invalid key); refusing to emit a mock signature"
             )
 
         try:
             typed_data = order.to_typed_data(CLOB_DOMAIN)
-            signed = self._account.sign_typed_data(**typed_data)
+            signed = self._account.sign_typed_data(full_message=typed_data)
+
+            signature = signed.signature
+            if isinstance(signature, (bytes, bytearray)):
+                signature = signature.hex()
+            else:
+                signature = signature.removeprefix("0x")
 
             return SignedOrder(
                 order=order,
-                signature=signed.signature.hex(),
+                signature=f"0x{signature}",
                 signer=self._address,
             )
         except Exception as e:
@@ -217,11 +232,25 @@ class CLOBExecutor:
         signer: EIP712Signer,
         rpc_url: str | None = None,
         api_url: str = "https://clob.polymarket.com",
+        dry_run: bool | None = None,
     ):
         self.signer = signer
         self.rpc_url = rpc_url
         self.api_url = api_url
+        # dry_run=None resolves lazily from the DRY_RUN env var and defaults
+        # to True so an unconfigured deployment can never trade live.
+        self.dry_run = dry_run
         self._client: httpx.AsyncClient | None = None
+
+    def _is_dry_run(self) -> bool:
+        if self.dry_run is not None:
+            return self.dry_run
+        return os.environ.get("DRY_RUN", "true").strip().lower() not in {
+            "0",
+            "false",
+            "no",
+            "off",
+        }
 
     async def __aenter__(self) -> CLOBExecutor:
         self._client = httpx.AsyncClient(base_url=self.api_url, timeout=30.0)
@@ -243,6 +272,13 @@ class CLOBExecutor:
         """
         if not self._client:
             return OrderResult(success=False, error="Client not initialized")
+
+        if self._is_dry_run():
+            logger.info(
+                "DRY_RUN: skipping live order submission (nonce=%s)",
+                signed.order.nonce,
+            )
+            return OrderResult(success=True, order_id=f"dry_run:{signed.order.nonce}")
 
         try:
             # Build order payload
@@ -333,6 +369,46 @@ class CLOBExecutor:
             logger.error(f"Failed to get positions: {e}")
             return []
 
+    async def close_position(self, position_id: str) -> OrderResult:
+        """Flatten a single open position by submitting a SELL order.
+
+        Matches on position_id, asset, or token_id. Returns an honest
+        failure result when the position does not exist.
+        """
+        positions = await self.get_positions()
+        target = None
+        for pos in positions:
+            if position_id in (
+                pos.get("position_id"),
+                pos.get("asset"),
+                pos.get("token_id"),
+            ):
+                target = pos
+                break
+
+        if target is None:
+            return OrderResult(
+                success=False,
+                error=f"position {position_id} not found among open positions",
+            )
+
+        token = (
+            target.get("token_id")
+            or target.get("asset")
+            or target.get("position_id")
+        )
+        size = float(target.get("size") or 0)
+        price = float(target.get("avg_price") or target.get("cur_price") or 0.5)
+
+        order = self.signer.create_order(
+            side="SELL",
+            size_usd=size * price,
+            price=price,
+            token=token,
+        )
+        signed = self.signer.sign_order(order)
+        return await self.submit_order(signed)
+
 
 class CollateralManager:
     """
@@ -375,11 +451,10 @@ class CollateralManager:
             Transaction hash
         """
         if not self._init_web3():
-            return "0x" + "00" * 32  # Mock tx
+            raise RuntimeError("web3 backend unavailable; cannot wrap USDC")
 
-        # In production, call the wrap function on the collateral contract
         logger.info(f"Wrapping {amount} USDC to pUSDC")
-        return "0x" + "00" * 32
+        raise RuntimeError("collateral wrap is not wired to a contract yet")
 
     async def unwrap_pusdc(self, amount: int) -> str:
         """
@@ -392,10 +467,10 @@ class CollateralManager:
             Transaction hash
         """
         if not self._init_web3():
-            return "0x" + "00" * 32  # Mock tx
+            raise RuntimeError("web3 backend unavailable; cannot unwrap pUSDC")
 
         logger.info(f"Unwrapping {amount} pUSDC to USDC")
-        return "0x" + "00" * 32
+        raise RuntimeError("collateral unwrap is not wired to a contract yet")
 
     async def get_balance(self, address: str) -> dict:
         """Get USDC and pUSDC balances."""

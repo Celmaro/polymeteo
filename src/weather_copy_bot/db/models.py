@@ -76,6 +76,19 @@ class Strategy(Base):
         Index("ix_strategy_name_active", "name", "is_active"),
     )
 
+    def __init__(self, **kwargs):
+        kwargs.setdefault("version", 1)
+        kwargs.setdefault("copy_ratio", 0.25)
+        kwargs.setdefault("max_position_usd", 250.0)
+        kwargs.setdefault("max_daily_loss_usd", 500.0)
+        kwargs.setdefault("min_edge_bps", 50.0)
+        kwargs.setdefault("max_copy_latency_ms", 800)
+        kwargs.setdefault("base_markout", 0.035)
+        kwargs.setdefault("latency_decay_rate", 0.012)
+        kwargs.setdefault("fee_rate", 0.002)
+        kwargs.setdefault("is_active", True)
+        super().__init__(**kwargs)
+
 
 class StrategyRun(Base):
     """A backtest/paper/live run associated with a strategy version."""

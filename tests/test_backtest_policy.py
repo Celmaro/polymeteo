@@ -5,7 +5,7 @@ from weather_copy_bot.config import Settings
 from weather_copy_bot.models import Side, TradeSignal
 
 
-def _signal(latency_ms: int) -> TradeSignal:
+def _signal(latency_ms: int, price: float = 0.42) -> TradeSignal:
     now = datetime.now(timezone.utc)
     return TradeSignal(
         signal_id="t1",
@@ -15,7 +15,7 @@ def _signal(latency_ms: int) -> TradeSignal:
         city="Tokyo",
         outcome="Yes",
         side=Side.BUY,
-        price=0.42,
+        price=price,
         size_usd=100,
         detected_at=now,
         target_filled_at=now,
@@ -35,3 +35,16 @@ def test_fresh_signal_is_copied():
     decision = CopyBacktester(settings).decide(_signal(350))
     assert decision.should_copy is True
     assert decision.copy_size_usd == 25.0
+
+
+def test_thin_edge_near_mid_price_is_rejected():
+    settings = Settings(max_copy_latency_ms=800, copy_ratio=0.25, max_position_usd=250)
+    decision = CopyBacktester(settings).decide(_signal(350, price=0.50))
+    assert decision.should_copy is False
+    assert decision.reason == "thin_edge"
+
+
+def test_healthy_edge_still_copied():
+    settings = Settings(max_copy_latency_ms=800, copy_ratio=0.25, max_position_usd=250)
+    decision = CopyBacktester(settings).decide(_signal(350, price=0.60))
+    assert decision.should_copy is True

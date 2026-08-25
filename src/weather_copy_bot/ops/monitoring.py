@@ -360,12 +360,18 @@ class MonitoringService:
             )
 
         for alert in alerts_to_send:
-            with suppress(Exception):
-                await self._notifier.send_alert(
-                    title=alert["title"],
-                    message=alert["message"],
-                    severity=alert["severity"],
-                )
+            await self._send_alert_safely(alert)
+
+    async def _send_alert_safely(self, alert: dict) -> None:
+        """Send one alert without letting a delivery failure abort the batch."""
+        try:
+            await self._notifier.send_alert(
+                title=alert["title"],
+                message=alert["message"],
+                severity=alert["severity"],
+            )
+        except Exception as e:
+            logger.error(f"[MONITOR] Failed to send alert '{alert['title']}': {e}")
 
     async def _send_hourly_report(self) -> None:
         """Send hourly status report."""

@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 
 from weather_copy_bot.backtest.engine import CopyBacktester
 from weather_copy_bot.config import Settings, get_settings
+from weather_copy_bot.live.risk_engine import RiskEngine
 from weather_copy_bot.models import CopyDecision, Side, TradeSignal
 from weather_copy_bot.paper.trader import PaperTrader
 from weather_copy_bot.polymarket.client import PolymarketClient
@@ -38,6 +39,7 @@ class CopyEngine:
         self.client = client or PolymarketClient(self.settings)
         self.policy = CopyBacktester(self.settings)
         self.paper = PaperTrader(self.settings)
+        self.risk: RiskEngine | None = RiskEngine()
         self.on_decision = on_decision
         self._seen: set[str] = set()
         self._running = False
@@ -47,6 +49,9 @@ class CopyEngine:
             "skipped": 0,
             "avg_latency_ms": 0.0,
             "last_heartbeat": None,
+            "risk_rejections": 0,
+            "live_orders_filled": 0,
+            "live_orders_failed": 0,
         }
 
     @property
@@ -62,6 +67,13 @@ class CopyEngine:
             decision = self.paper.on_signal(signal)
         else:
             decision = self.policy.decide(signal)
+            if decision.should_copy and self.risk is not None:
+                check = self.risk.check_size_limits(decision.copy_size_usd)
+                if check.rejected:
+                    logger.warning("Live copy blocked by risk engine: %s", check.reason)
+                    decision.should_copy = False
+                    decision.reason = f"risk_rejected:{check.reason}"
+                    self.stats["risk_rejections"] += 1
             if decision.should_copy:
                 await self._execute_live(decision)
 
@@ -77,7 +89,7 @@ class CopyEngine:
             await self.on_decision(signal, decision)
         return decision
 
-    async def _execute_live(self, decision: CopyDecision) -> None:
+    async def _execute_live(self, decision: CopyDecision) -> dict:
         signal = decision.signal
         logger.info(
             "LIVE COPY %s %s $%.2f @ %.3f latency=%sms",
@@ -87,12 +99,21 @@ class CopyEngine:
             signal.price,
             signal.latency_ms,
         )
-        await self.client.place_order(
-            token_id=signal.token_id or "",
-            side=signal.side.value,
-            price=signal.price,
-            size_usd=decision.copy_size_usd,
-        )
+        try:
+            result = await self.client.place_order(
+                token_id=signal.token_id or "",
+                side=signal.side.value,
+                price=signal.price,
+                size_usd=decision.copy_size_usd,
+            )
+        except Exception as exc:
+            self.stats["live_orders_failed"] += 1
+            logger.exception(
+                "LIVE COPY FAILED %s %s: %s", signal.side.value, signal.market_slug, exc
+            )
+            return {"status": "error", "error": str(exc)}
+        self.stats["live_orders_filled"] += 1
+        return result if isinstance(result, dict) else {"status": "filled"}
 
     async def poll_once(self) -> list[TradeSignal]:
         """Poll target activity and convert fresh fills into copy signals."""

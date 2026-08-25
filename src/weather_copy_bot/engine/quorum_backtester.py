@@ -4,6 +4,7 @@ Tests the quorum-based copy trading strategy on historical data.
 """
 
 import logging
+import time
 from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -89,6 +90,9 @@ class QuorumBacktester:
         self.db = db_manager
         self.config = config or BacktestConfig()
 
+        # Simulated clock: advanced to each signal's timestamp during run()
+        self._backtest_now = time.time()
+
         # Initialize quorum engine with config
         self._quorum_engine = QuorumEngine(
             min_quorum_count=self.config.min_quorum_count,
@@ -96,6 +100,7 @@ class QuorumBacktester:
             window_seconds=self.config.window_seconds,
             max_acceptable_price=self.config.max_acceptable_price,
             max_slippage_bps=self.config.max_slippage_bps,
+            clock=lambda: self._backtest_now,
         )
 
         # Stats
@@ -113,6 +118,7 @@ class QuorumBacktester:
             "quorum_times": [],
             "consecutive_losses": 0,
             "max_consecutive_losses": 0,
+            "total_pnl": 0.0,
         }
 
         # Running balance
@@ -201,6 +207,9 @@ class QuorumBacktester:
 
             # Create quorum signal
             q_signal = self._create_signal(signal)
+
+            # Advance the simulated clock so historical windows evaluate correctly
+            self._backtest_now = q_signal.timestamp
 
             # Register signal
             consensus = self._quorum_engine.register_signal(q_signal)

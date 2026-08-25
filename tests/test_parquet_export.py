@@ -1,18 +1,6 @@
 """Tests for Parquet data export."""
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-from unittest.mock import MagicMock
-
-import pytest
-
-sys.modules["sqlalchemy"] = MagicMock()
-
-src_path = Path(__file__).parent.parent / "src"
-sys.path.insert(0, str(src_path))
-
-
 from weather_copy_bot.parquet_export import (
     MarketDataSchema,
     ParquetExporter,

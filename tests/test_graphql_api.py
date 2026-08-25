@@ -1,11 +1,14 @@
 """Tests for GraphQL API layer."""
+from datetime import datetime, timezone
+
 import pytest
+
 from weather_copy_bot.graphql_api import (
-    schema,
-    MarketCategory,
-    PriceData,
-    MarketSummary,
     ConsensusSignal,
+    MarketCategory,
+    MarketSummary,
+    PriceData,
+    schema,
 )
 
 
@@ -19,24 +22,22 @@ class TestGraphQLSchema:
         assert MarketCategory.OTHER.value == "other"
 
     def test_price_data_creation(self):
-        from datetime import datetime
         price_data = PriceData(
             yes_price=0.65,
             no_price=0.35,
             volume=1000000.0,
-            updated_at=datetime.now(),
+            updated_at=datetime.now(timezone.utc),
         )
         assert price_data.yes_price == 0.65
         assert price_data.no_price == 0.35
         assert price_data.volume == 1000000.0
 
     def test_market_summary_creation(self):
-        from datetime import datetime
         price_data = PriceData(
             yes_price=0.55,
             no_price=0.45,
             volume=500000.0,
-            updated_at=datetime.now(),
+            updated_at=datetime.now(timezone.utc),
         )
         market = MarketSummary(
             market_id="test-market-1",
@@ -76,7 +77,7 @@ class TestGraphQLSchema:
         assert result.data == {"market": None}
 
     @pytest.mark.asyncio
-    async def test_mutation_copy_trade(self):
+    async def test_mutation_copy_trade_refuses_until_wired(self):
         result = await schema.execute(
             """
             mutation {
@@ -88,13 +89,11 @@ class TestGraphQLSchema:
             }
             """
         )
-        assert result.errors is None
-        assert result.data["copyTrade"]["walletAddress"] == "0x123"
-        assert result.data["copyTrade"]["marketId"] == "test"
-        assert result.data["copyTrade"]["positionSize"] == 100.0
+        assert result.errors is not None
+        assert "not wired" in str(result.errors).lower()
 
     @pytest.mark.asyncio
-    async def test_mutation_close_position(self):
+    async def test_mutation_close_position_refuses_until_wired(self):
         result = await schema.execute(
             """
             mutation {
@@ -106,6 +105,5 @@ class TestGraphQLSchema:
             }
             """
         )
-        assert result.errors is None
-        assert result.data["closePosition"]["walletAddress"] == "0x123"
-        assert result.data["closePosition"]["positionSize"] == 0.0
+        assert result.errors is not None
+        assert "not wired" in str(result.errors).lower()

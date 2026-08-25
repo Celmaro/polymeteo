@@ -14,7 +14,7 @@ from weather_copy_bot.models import CopyDecision, Side, TradeSignal
 def _signal(
     wallet: str = "0xabc",
     latency_ms: int = 350,
-    price: float = 0.5,
+    price: float = 0.42,
     size: float = 100.0,
     city: str = "New York",
 ) -> TradeSignal:
@@ -230,3 +230,58 @@ class TestEngineLifecycle:
         await asyncio.wait_for(task, timeout=2.0)
         assert engine._running is False
         assert poll_count <= 3
+
+
+class TestLiveRiskGating:
+    """Live execution must pass through RiskEngine and record order results."""
+
+    def _live_engine(self) -> CopyEngine:
+        settings = Settings(
+            dry_run=False,
+            polymarket_private_key="0xsecret",
+            max_copy_latency_ms=800,
+            copy_ratio=0.25,
+        )
+        return CopyEngine(settings=settings)
+
+    @pytest.mark.asyncio
+    async def test_risk_rejection_blocks_live_order(self):
+        from weather_copy_bot.live.risk_engine import RiskEngine, RiskLimits
+
+        engine = self._live_engine()
+        engine.risk = RiskEngine(limits=RiskLimits(max_trade_size_usd=10.0))
+        engine.client.place_order = AsyncMock(return_value={"status": "matched"})
+
+        decision = await engine.process_signal(_signal(size=1000.0))
+
+        engine.client.place_order.assert_not_called()
+        assert decision.should_copy is False
+        assert "risk" in decision.reason.lower()
+        assert engine.stats["risk_rejections"] == 1
+        assert engine.stats["copied"] == 0
+        assert engine.stats["skipped"] == 1
+
+    @pytest.mark.asyncio
+    async def test_live_order_success_recorded(self):
+        engine = self._live_engine()
+        engine.risk = None
+        engine.client.place_order = AsyncMock(
+            return_value={"status": "matched", "orderID": "abc123"}
+        )
+
+        await engine.process_signal(_signal())
+
+        engine.client.place_order.assert_awaited_once()
+        assert engine.stats["live_orders_filled"] == 1
+        assert engine.stats["live_orders_failed"] == 0
+
+    @pytest.mark.asyncio
+    async def test_live_order_failure_recorded(self):
+        engine = self._live_engine()
+        engine.risk = None
+        engine.client.place_order = AsyncMock(side_effect=RuntimeError("CLOB locked"))
+
+        await engine.process_signal(_signal())
+
+        assert engine.stats["live_orders_failed"] == 1
+        assert engine.stats["live_orders_filled"] == 0

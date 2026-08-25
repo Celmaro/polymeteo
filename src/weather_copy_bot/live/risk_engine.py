@@ -159,8 +159,20 @@ class RiskEngine:
                 severity="CRITICAL",
             )
 
-        # Check 2: Daily loss limit
+        # Check 2: Daily loss limit (drawdown breaker evaluated first so a
+        # fresh breach trips and reports the breaker instead of being masked)
         if daily_pnl <= -self.limits.max_daily_loss_usd:
+            if self.limits.enable_circuit_breaker:
+                drawdown = self._calculate_drawdown(balance)
+                if drawdown >= self.limits.circuit_breaker_threshold:
+                    self._circuit_breaker_tripped = True
+                    self._circuit_breaker_reason = f"drawdown:{drawdown:.2%}"
+                    return RiskCheck(
+                        passed=False,
+                        rejected=True,
+                        reason=self._circuit_breaker_reason,
+                        severity="CRITICAL",
+                    )
             return RiskCheck(
                 passed=False,
                 rejected=True,
@@ -304,6 +316,34 @@ class RiskEngine:
             )
 
         return RiskCheck(passed=True, reason="market_acceptable")
+
+    def check_size_limits(self, size_usd: float) -> RiskCheck:
+        """Validate a proposed trade size against per-trade and position caps."""
+        if size_usd < self.limits.min_trade_size_usd:
+            return RiskCheck(
+                passed=False,
+                rejected=True,
+                reason=f"min_trade_size_violation:{size_usd:.2f}",
+                severity="WARNING",
+            )
+
+        if size_usd > self.limits.max_trade_size_usd:
+            return RiskCheck(
+                passed=False,
+                rejected=True,
+                reason=f"max_trade_size_violation:{size_usd:.2f}",
+                severity="WARNING",
+            )
+
+        if size_usd > self.limits.max_position_usd:
+            return RiskCheck(
+                passed=False,
+                rejected=True,
+                reason=f"max_position_exceeded:{size_usd:.2f}",
+                severity="WARNING",
+            )
+
+        return RiskCheck(passed=True, reason="size_within_limits")
 
     def _calculate_drawdown(self, current_balance: float) -> float:
         """Calculate current drawdown from peak."""

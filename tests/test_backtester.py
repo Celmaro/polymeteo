@@ -17,6 +17,9 @@ class TestCopyBacktester:
             signal_id="sig-001",
             target_wallet="0x123",
             market_slug="weather-nyc",
+            market_title="Temperature above 90F in NYC?",
+            city="NYC",
+            outcome="Yes",
             side=Side.BUY,
             price=0.60,
             size_usd=100.0,
@@ -37,6 +40,9 @@ class TestCopyBacktester:
             signal_id="sig-002",
             target_wallet="0x123",
             market_slug="weather-nyc",
+            market_title="Temperature above 90F in NYC?",
+            city="NYC",
+            outcome="Yes",
             side=Side.BUY,
             price=0.60,
             size_usd=10.0,  # Very small
@@ -57,6 +63,9 @@ class TestCopyBacktester:
             signal_id="sig-003",
             target_wallet="0x456",
             market_slug="weather-la",
+            market_title="Temperature above 85F in LA?",
+            city="LA",
+            outcome="Yes",
             side=Side.BUY,
             price=0.55,
             size_usd=200.0,
@@ -75,7 +84,7 @@ class TestCopyBacktester:
         result = backtester.run([])
 
         assert result.summary.trade_count == 0
-        assert result.summary.total_pnl == 0.0
+        assert result.summary.total_pnl_usd == 0.0
 
     def test_run_with_signals(self):
         """Test running backtest with signals."""
@@ -86,6 +95,9 @@ class TestCopyBacktester:
                 signal_id=f"sig-{i:03d}",
                 target_wallet="0x123",
                 market_slug="weather-nyc",
+                market_title="Temperature above 90F in NYC?",
+                city="NYC",
+                outcome="Yes",
                 side=Side.BUY if i % 2 == 0 else Side.SELL,
                 price=0.55,
                 size_usd=100.0,

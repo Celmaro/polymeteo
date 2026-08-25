@@ -286,7 +286,7 @@ class TWAPSlicer:
         if execution.total_filled > 0:
             # Compare to single large order at worst price
             worst_price = max(s.price_limit for s in execution.slices)
-            avg_price = execution.avg_fill_price
+            avg_price = execution.total_cost / execution.total_filled
 
             # Savings in basis points
             savings_bps = abs(worst_price - avg_price) / avg_price * 10000
