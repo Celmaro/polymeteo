@@ -1,5 +1,3 @@
 {
-    "dependencies": {
-      "ioredis-om-typed": "^6.0.0"
-    }
-  }
+    "dependencies": {}
+}
