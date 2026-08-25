@@ -27,7 +27,6 @@ const topPerformers = [
 export default function Performance() {
   const maxPnl = Math.max(...weeklyPerformance.map((w) => w.pnl));
   const totalPnl = weeklyPerformance.reduce((sum, w) => sum + w.pnl, 0);
-  const maxReturn = Math.max(...topPerformers.map((t) => Math.abs(t.return)));
 
   return (
     <DashboardLayout>
