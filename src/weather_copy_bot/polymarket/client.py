@@ -161,7 +161,9 @@ class PolymarketClient:
                             "gamma public-search query %r failed (%s)", keyword, exc
                         )
                         continue
-                    events = body.get("events", []) if isinstance(body, dict) else []
+                    if not isinstance(body, dict):
+                        continue
+                    events = body.get("events") or []
                     for event in events:
                         if not isinstance(event, dict):
                             continue
@@ -195,10 +197,12 @@ class PolymarketClient:
         Resolves live weather markets to conditionIds via gamma public-search
         first (covering markets outside the popularity-ordered active window),
         falling back to the keyword-filtered windowed scan when search yields
-        nothing. Queries the data-api activity feed per market WITHOUT a user
-        filter so trades from any address appear. Returns raw observations for
-        ranking in engine.wallet_discovery. Raises only when every market
-        query is rejected, mirroring fetch_target_activity's contract.
+        nothing. Queries the data-api public trades feed (/trades) per market
+        WITHOUT a user filter so trades from any address appear; USD notional
+        is derived from size * price because /trades omits usdcSize. Returns
+        raw observations for ranking in engine.wallet_discovery. Raises only
+        when every market query is rejected, mirroring
+        fetch_target_activity's contract.
         """
         targets = await self._search_weather_condition_ids(max_markets)
         if not targets:
@@ -215,7 +219,7 @@ class PolymarketClient:
         try:
             async with httpx.AsyncClient(timeout=6.0) as client:
                 for condition_id, slug in targets:
-                    url = f"{self.settings.data_api_host}/activity"
+                    url = f"{self.settings.data_api_host}/trades"
                     resp = await client.get(
                         url,
                         params={"market": condition_id, "limit": trades_per_market},
@@ -223,14 +227,16 @@ class PolymarketClient:
                     if resp.status_code != 200:
                         rejected.append(resp.status_code)
                         logger.warning(
-                            "activity API rejected market scan %s (HTTP %d)",
+                            "trades feed rejected market scan %s (HTTP %d)",
                             slug,
                             resp.status_code,
                         )
                         continue
                     for item in resp.json():
                         wallet = str(item.get("proxyWallet", "")).strip().lower()
-                        size_usd = float(item.get("usdcSize", 0.0) or 0.0)
+                        shares = float(item.get("size", 0.0) or 0.0)
+                        price = float(item.get("price", 0.0) or 0.0)
+                        size_usd = shares * price
                         if not wallet or size_usd <= 0:
                             continue
                         observations.append(
@@ -245,11 +251,11 @@ class PolymarketClient:
                             }
                         )
         except httpx.HTTPError as exc:
-            logger.debug("discovery activity feed unreachable (%s)", exc)
+            logger.debug("discovery trades feed unreachable (%s)", exc)
 
         if targets and len(rejected) == len(targets):
             codes = ", ".join(str(code) for code in sorted(set(rejected)))
-            raise RuntimeError(f"discovery activity feed rejected all markets: {codes}")
+            raise RuntimeError(f"discovery trades feed rejected all markets: {codes}")
 
         return observations
 

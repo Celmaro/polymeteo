@@ -43,11 +43,15 @@ def _discovery_settings(**overrides) -> Settings:
     return Settings(**values)
 
 
-def _activity_item(wallet: str, size: float, ts: int, side: str = "BUY") -> dict:
+def _trade_item(
+    wallet: str, shares: float, price: float, ts: int, side: str = "BUY"
+) -> dict:
+    """Data-api /trades row: USD notional is derived as size * price."""
     return {
         "proxyWallet": wallet,
         "side": side,
-        "usdcSize": size,
+        "size": shares,
+        "price": price,
         "timestamp": ts,
         "slug": "highest-temperature-in-new-york",
     }
@@ -111,16 +115,17 @@ class TestDiscoverWeatherWalletsHttp:
             if request.url.path.endswith("/public-search"):
                 assert request.url.params["events_status"] == "active"
                 return httpx.Response(200, json=_search_events())
-            # Only the live market reaches the activity scan.
+            # Only the live market reaches the public trades scan.
+            assert request.url.path.endswith("/trades")
             assert request.url.params["market"] == "0xcond1"
             assert "user" not in request.url.params
             return httpx.Response(
                 200,
                 json=[
-                    _activity_item("0xNewWhale01", 250.0, 1_700_000_000),
-                    _activity_item("0xDustWallet01", 1.0, 1_700_000_001),
+                    _trade_item("0xNewWhale01", 500.0, 0.5, 1_700_000_000),
+                    _trade_item("0xDustWallet01", 2.0, 0.5, 1_700_000_001),
                     # Missing proxyWallet -> skipped.
-                    {"side": "BUY", "usdcSize": 50.0},
+                    {"side": "BUY", "size": 100.0, "price": 0.5},
                 ],
             )
 
@@ -145,12 +150,28 @@ class TestDiscoverWeatherWalletsHttp:
             assert request.url.params["market"] == "0xcond1"
             return httpx.Response(
                 200,
-                json=[_activity_item("0xResilient01", 250.0, 1_700_000_003)],
+                json=[_trade_item("0xResilient01", 250.0, 1.0, 1_700_000_003)],
             )
 
         client = self._install_transport(monkeypatch, handler)
         obs = await client.discover_weather_wallets()
         assert [o["wallet"] for o in obs] == ["0xresilient01"]
+
+    async def test_search_tolerates_null_events_payload(self, monkeypatch):
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("/public-search"):
+                if request.url.params["q"] == "\u00b0f":
+                    # Gamma answers degree-sign queries with {"events": null}.
+                    return httpx.Response(200, json={"events": None})
+                return httpx.Response(200, json=_search_events())
+            return httpx.Response(
+                200,
+                json=[_trade_item("0xNullTolerant01", 300.0, 0.5, 1_700_000_004)],
+            )
+
+        client = self._install_transport(monkeypatch, handler)
+        obs = await client.discover_weather_wallets()
+        assert [o["wallet"] for o in obs] == ["0xnulltolerant01"]
 
     async def test_falls_back_to_windowed_scan_when_search_is_empty(self, monkeypatch):
         def handler(request: httpx.Request) -> httpx.Response:
@@ -160,7 +181,7 @@ class TestDiscoverWeatherWalletsHttp:
                 return httpx.Response(200, json=GAMMA_MARKETS)
             return httpx.Response(
                 200,
-                json=[_activity_item("0xFallback01", 120.0, 1_700_000_002)],
+                json=[_trade_item("0xFallback01", 240.0, 0.5, 1_700_000_002)],
             )
 
         client = self._install_transport(monkeypatch, handler)
@@ -174,7 +195,7 @@ class TestDiscoverWeatherWalletsHttp:
             return httpx.Response(403)
 
         client = self._install_transport(monkeypatch, handler)
-        with pytest.raises(RuntimeError, match="discovery activity feed rejected"):
+        with pytest.raises(RuntimeError, match="discovery trades feed rejected"):
             await client.discover_weather_wallets()
 
     async def test_offline_gamma_yields_empty_result(self, monkeypatch):
