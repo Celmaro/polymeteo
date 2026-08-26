@@ -221,6 +221,42 @@ class TestFetchTargetActivityHttp:
         assert events[0]["demo"] is False
         assert events[0]["city"] == "New York"
 
+    async def test_epoch_and_iso_timestamps_normalized(self, monkeypatch):
+        """Real /activity rows carry unix epoch ints; engine requires ISO strings."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "id": "evt-epoch",
+                        "title": "Highest temperature in New York?",
+                        "slug": "highest-temperature-in-new-york",
+                        "side": "BUY",
+                        "price": 0.55,
+                        "usdcSize": 80.0,
+                        "timestamp": 1700000000,
+                    },
+                    {
+                        "id": "evt-iso",
+                        "title": "Will it rain in London tomorrow?",
+                        "slug": "rain-in-london",
+                        "side": "SELL",
+                        "price": 0.4,
+                        "usdcSize": 60.0,
+                        "timestamp": "2026-08-26T00:00:00+00:00",
+                    },
+                ],
+            )
+
+        client = self._install_transport(monkeypatch, handler)
+
+        events = await client.fetch_target_activity(["0xgoodwallet1"])
+
+        by_id = {event["id"]: event for event in events}
+        assert by_id["evt-epoch"]["timestamp"] == "2023-11-14T22:13:20+00:00"
+        assert by_id["evt-iso"]["timestamp"] == "2026-08-26T00:00:00+00:00"
+
     async def test_connect_error_keeps_demo_fallback(self, monkeypatch):
         def handler(request: httpx.Request) -> httpx.Response:
             raise httpx.ConnectError("offline", request=request)

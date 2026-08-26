@@ -89,8 +89,9 @@ class PolymarketClient:
                             {
                                 "id": str(item.get("id", item.get("transactionHash", ""))),
                                 "wallet": wallet,
-                                "timestamp": item.get("timestamp")
-                                or datetime.now(timezone.utc).isoformat(),
+                                "timestamp": self._normalize_activity_timestamp(
+                                    item.get("timestamp")
+                                ),
                                 "market_slug": item.get("slug")
                                 or item.get("eventSlug")
                                 or "weather",
@@ -118,6 +119,14 @@ class PolymarketClient:
             raise RuntimeError(f"activity API rejected wallets: {codes}")
 
         return self._next_demo_events(wallets)
+
+    @staticmethod
+    def _normalize_activity_timestamp(value: Any) -> str:
+        """Coerce data-api timestamps (unix epoch seconds or ISO strings) to ISO-8601 UTC."""
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
+            return datetime.fromtimestamp(value, tz=timezone.utc).isoformat()
+        text = str(value or "").strip()
+        return text or datetime.now(timezone.utc).isoformat()
 
     async def _search_weather_condition_ids(
         self,
