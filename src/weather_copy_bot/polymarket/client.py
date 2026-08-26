@@ -119,6 +119,57 @@ class PolymarketClient:
 
         return self._next_demo_events(wallets)
 
+    async def _search_weather_condition_ids(
+        self,
+        max_markets: int,
+    ) -> list[tuple[str, str]]:
+        """Resolve active weather conditionIds via the gamma search index.
+
+        Gamma's default active-market window is ordered by popularity and
+        rarely contains daily weather markets, so discovery queries
+        public-search per weather keyword instead. Falls back silently to an
+        empty result on any network trouble, letting callers use the windowed
+        scan.
+        """
+        found: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        try:
+            async with httpx.AsyncClient(timeout=6.0) as client:
+                for keyword in self.settings.weather_keywords:
+                    resp = await client.get(
+                        f"{self.settings.gamma_host}/public-search",
+                        params={
+                            "q": keyword,
+                            "events_status": "active",
+                            "limit_per_type": 10,
+                        },
+                    )
+                    if resp.status_code != 200:
+                        logger.debug(
+                            "gamma public-search rejected keyword %s (HTTP %d)",
+                            keyword,
+                            resp.status_code,
+                        )
+                        continue
+                    for event in resp.json().get("events") or []:
+                        for market in event.get("markets") or []:
+                            condition_id = str(market.get("conditionId") or "").strip()
+                            if (
+                                not condition_id
+                                or condition_id in seen
+                                or not market.get("active")
+                                or market.get("closed")
+                            ):
+                                continue
+                            seen.add(condition_id)
+                            slug = str(market.get("slug") or event.get("slug") or "weather")
+                            found.append((condition_id, slug))
+                            if len(found) >= max_markets:
+                                return found
+        except httpx.HTTPError as exc:
+            logger.debug("gamma public-search unreachable (%s)", exc)
+        return found
+
     async def discover_weather_wallets(
         self,
         max_markets: int = 5,
@@ -126,20 +177,23 @@ class PolymarketClient:
     ) -> list[dict[str, Any]]:
         """Scan public trades on active weather markets for candidate wallets.
 
-        Resolves live weather markets from gamma to conditionIds, then queries
-        the data-api activity feed per market WITHOUT a user filter so trades
-        from any address appear. Returns raw observations for ranking in
-        engine.wallet_discovery. Raises only when every market query is
-        rejected, mirroring fetch_target_activity's contract.
+        Resolves live weather markets to conditionIds via gamma public-search
+        first (covering markets outside the popularity-ordered active window),
+        falling back to the keyword-filtered windowed scan when search yields
+        nothing. Queries the data-api activity feed per market WITHOUT a user
+        filter so trades from any address appear. Returns raw observations for
+        ranking in engine.wallet_discovery. Raises only when every market
+        query is rejected, mirroring fetch_target_activity's contract.
         """
-        markets = await self.fetch_weather_markets()
-        targets: list[tuple[str, str]] = []
-        for market in markets:
-            condition_id = market.get("conditionId")
-            if condition_id:
-                targets.append((str(condition_id), str(market.get("slug", "weather"))))
-            if len(targets) >= max_markets:
-                break
+        targets = await self._search_weather_condition_ids(max_markets)
+        if not targets:
+            markets = await self.fetch_weather_markets()
+            for market in markets:
+                condition_id = market.get("conditionId")
+                if condition_id:
+                    targets.append((str(condition_id), str(market.get("slug", "weather"))))
+                if len(targets) >= max_markets:
+                    break
 
         rejected: list[int] = []
         observations: list[dict[str, Any]] = []

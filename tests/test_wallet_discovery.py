@@ -63,6 +63,33 @@ def _activity_event(wallet: str, size: float, ts: float, slug: str = "m1") -> di
     }
 
 
+def _search_events() -> dict:
+    """Gamma public-search payload with one live and one closed weather market."""
+    return {
+        "events": [
+            {
+                "slug": "highest-temperature-in-new-york",
+                "title": "Highest temperature in New York?",
+                "markets": [
+                    {
+                        "conditionId": "0xcond1",
+                        "slug": "highest-temperature-in-new-york",
+                        "active": True,
+                        "closed": False,
+                    },
+                    {
+                        # Closed -> resolver must skip it.
+                        "conditionId": "0xclosed",
+                        "slug": "resolved-temperature-market",
+                        "active": False,
+                        "closed": True,
+                    },
+                ],
+            }
+        ]
+    }
+
+
 class TestDiscoverWeatherWalletsHttp:
     """HTTP behavior of discover_weather_wallets against a mocked transport."""
 
@@ -77,10 +104,14 @@ class TestDiscoverWeatherWalletsHttp:
         monkeypatch.setattr(httpx, "AsyncClient", factory)
         return PolymarketClient()
 
-    async def test_scans_activity_by_market_and_parses_observations(self, monkeypatch):
+    async def test_search_supplies_condition_ids_and_parses_observations(
+        self, monkeypatch
+    ):
         def handler(request: httpx.Request) -> httpx.Response:
-            if request.url.path.endswith("/markets"):
-                return httpx.Response(200, json=GAMMA_MARKETS)
+            if request.url.path.endswith("/public-search"):
+                assert request.url.params["events_status"] == "active"
+                return httpx.Response(200, json=_search_events())
+            # Only the live market reaches the activity scan.
             assert request.url.params["market"] == "0xcond1"
             assert "user" not in request.url.params
             return httpx.Response(
@@ -101,10 +132,25 @@ class TestDiscoverWeatherWalletsHttp:
         assert obs[0]["size_usd"] == 250.0
         assert obs[0]["timestamp"] == 1_700_000_000.0
 
+    async def test_falls_back_to_windowed_scan_when_search_is_empty(self, monkeypatch):
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("/public-search"):
+                return httpx.Response(200, json={"events": []})
+            if request.url.path.endswith("/markets"):
+                return httpx.Response(200, json=GAMMA_MARKETS)
+            return httpx.Response(
+                200,
+                json=[_activity_item("0xFallback01", 120.0, 1_700_000_002)],
+            )
+
+        client = self._install_transport(monkeypatch, handler)
+        obs = await client.discover_weather_wallets()
+        assert [o["wallet"] for o in obs] == ["0xfallback01"]
+
     async def test_all_markets_rejected_raises(self, monkeypatch):
         def handler(request: httpx.Request) -> httpx.Response:
-            if request.url.path.endswith("/markets"):
-                return httpx.Response(200, json=GAMMA_MARKETS[:1])
+            if request.url.path.endswith("/public-search"):
+                return httpx.Response(200, json=_search_events())
             return httpx.Response(403)
 
         client = self._install_transport(monkeypatch, handler)
