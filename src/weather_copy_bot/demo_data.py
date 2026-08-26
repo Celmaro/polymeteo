@@ -22,8 +22,10 @@ from weather_copy_bot.models import (
     WalletScorecard,
 )
 
-ROOT = Path(os.environ.get("APP_ROOT", "/app"))
-DATA_DIR = ROOT / "data" / "demo"
+
+def _data_dir() -> Path:
+    """Resolve at call time so APP_ROOT overrides (e.g. tests) take effect."""
+    return Path(os.environ.get("APP_ROOT", "/app")) / "data" / "demo"
 
 CITIES = [
     "New York",
@@ -369,16 +371,17 @@ class DashboardService:
 
 
 def export_demo_json() -> Path:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    data_dir = _data_dir()
+    data_dir.mkdir(parents=True, exist_ok=True)
     service = DashboardService()
     payload = service.create_dashboard_payload()
-    path = DATA_DIR / "dashboard.json"
+    path = data_dir / "dashboard.json"
     path.write_text(payload.model_dump_json(indent=2), encoding="utf-8")
     return path
 
 
 def load_dashboard_payload() -> dict[str, Any]:
-    path = DATA_DIR / "dashboard.json"
+    path = _data_dir() / "dashboard.json"
     if not path.exists():
         export_demo_json()
     return json.loads(path.read_text(encoding="utf-8"))

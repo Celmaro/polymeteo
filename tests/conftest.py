@@ -15,6 +15,12 @@ def reset_settings_cache():
     get_settings.cache_clear()
 
 
+@pytest.fixture(autouse=True)
+def sandbox_app_root(tmp_path, monkeypatch):
+    """Redirect APP_ROOT so tests never write to a real application root."""
+    monkeypatch.setenv("APP_ROOT", str(tmp_path))
+
+
 @pytest.fixture
 def sample_trade_signal():
     """Create a sample trade signal for testing."""
