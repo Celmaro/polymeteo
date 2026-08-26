@@ -1,5 +1,8 @@
 """Tests for FastAPI application endpoints."""
 
+import asyncio
+from unittest.mock import MagicMock
+
 from fastapi.testclient import TestClient
 
 from weather_copy_bot.api.app import app
@@ -99,3 +102,86 @@ class TestRoutePrecedence:
         application = create_app()
         client = TestClient(application)
         assert client.get("/api/health").status_code == 200
+
+
+class TestEngineStatusLive:
+    """When an engine is attached to app.state, /api/engine/status goes live."""
+
+    def test_live_engine_reported_when_attached(self):
+        from weather_copy_bot.api.app import create_app
+        from weather_copy_bot.config import Settings
+        from weather_copy_bot.engine import CopyEngine
+
+        application = create_app()
+        engine = CopyEngine(
+            Settings(dry_run=True, target_wallets=["0xaaa", "0xbbb"]),
+            client=MagicMock(),
+        )
+        engine.stats["last_heartbeat"] = None
+        application.state.engine = engine
+        client = TestClient(application, raise_server_exceptions=False)
+
+        data = client.get("/api/engine/status").json()
+        assert data["source"] == "live"
+        assert data["mode"] == "paper"
+        assert data["dry_run"] is True
+        assert data["targets_active"] == 2
+        assert data["health"] == "starting"
+        assert data["stats"]["signals_detected"] == 0
+
+    def test_demo_payload_returned_without_engine(self):
+        from weather_copy_bot.api.app import create_app
+
+        application = create_app()
+        client = TestClient(application, raise_server_exceptions=False)
+        data = client.get("/api/engine/status").json()
+        assert data.get("source") != "live"
+        assert isinstance(data, dict)
+
+
+class TestEngineLifespan:
+    """ENGINE_ENABLED=true starts the copy loop inside the API process."""
+
+    def test_lifespan_starts_and_stops_engine_when_enabled(self, monkeypatch):
+        # Fetch the MODULE from sys.modules: the api package re-exports `app`
+        # (the FastAPI instance) under the same name, which shadows normal
+        # attribute-based imports.
+        import sys
+
+        app_module = sys.modules["weather_copy_bot.api.app"]
+        monkeypatch.setenv("ENGINE_ENABLED", "true")
+        started: list[object] = []
+
+        class StubEngine:
+            def __init__(self, settings):
+                self.settings = settings
+                self.mode = "paper"
+                self.stats = {}
+                self._running = False
+
+            async def run(self):
+                self._running = True
+                started.append(self)
+                while self._running:
+                    await asyncio.sleep(0.01)
+
+            def stop(self):
+                self._running = False
+
+        monkeypatch.setattr(app_module, "CopyEngine", StubEngine)
+        application = app_module.create_app()
+        with TestClient(application) as client:
+            assert client.get("/api/health").status_code == 200
+            assert len(started) == 1
+            assert application.state.engine is started[0]
+            assert application.state.engine._running is True
+        # Shutdown joined the loop: stop() flipped the flag.
+        assert application.state.engine._running is False
+
+    def test_lifespan_skips_engine_by_default(self):
+        from weather_copy_bot.api.app import create_app
+
+        application = create_app()
+        with TestClient(application) as client:
+            assert client.get("/api/health").status_code == 200
+            assert getattr(application.state, "engine", None) is None

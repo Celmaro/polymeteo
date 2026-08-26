@@ -37,6 +37,11 @@ class Settings(BaseSettings):
     market_filter: str = "weather"
     paper_starting_balance: float = 10_000.0
 
+    # Start the CopyEngine polling loop inside the API process lifespan.
+    # Defaults to False so web-only deploys and tests never hit Polymarket;
+    # production opts in explicitly via ENGINE_ENABLED=true.
+    engine_enabled: bool = False
+
     api_host: str = "0.0.0.0"
     api_port: int = 8000
     cors_origins: list[str] = Field(

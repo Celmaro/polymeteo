@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
+import time
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from functools import lru_cache
 from typing import Any
 
@@ -19,6 +24,7 @@ from weather_copy_bot.demo_data import (
     export_demo_json,
     load_dashboard_payload,
 )
+from weather_copy_bot.engine import CopyEngine
 
 logging.basicConfig(
     level=logging.INFO,
@@ -34,6 +40,80 @@ def _get_cached_payload() -> DashboardPayload:
 
 def _invalidate_cache() -> None:
     _get_cached_payload.cache_clear()
+
+
+HEARTBEAT_STALE_SECONDS = 30.0
+
+
+def _live_engine_status(engine: CopyEngine) -> dict[str, Any]:
+    """Build the engine/status payload from a live CopyEngine instance.
+
+    Field names mirror the demo payload so the dashboard frontend can render
+    either source without special-casing.
+    """
+    stats = dict(engine.stats)
+    running = bool(getattr(engine, "_running", False))
+    healthy = False
+    if running:
+        heartbeat = stats.get("last_heartbeat")
+        if not heartbeat:
+            # Loop started but the first poll has not completed yet.
+            healthy = True
+        else:
+            try:
+                age = datetime.now(timezone.utc) - datetime.fromisoformat(str(heartbeat))
+                healthy = age.total_seconds() < HEARTBEAT_STALE_SECONDS
+            except ValueError:
+                healthy = False
+    started_at = getattr(engine, "_started_at", None)
+    uptime_hours = round(max(time.time() - started_at, 0.0) / 3600.0, 2) if started_at else 0.0
+    return {
+        "mode": engine.mode,
+        "targets_active": len(engine.settings.target_wallets),
+        "poll_interval_ms": engine.settings.poll_interval_ms,
+        "max_copy_latency_ms": engine.settings.max_copy_latency_ms,
+        "avg_detect_to_submit_ms": round(float(stats.pop("avg_latency_ms", 0.0)), 1),
+        "uptime_hours": uptime_hours,
+        "health": "healthy" if healthy else "starting",
+        "running": running,
+        "dry_run": engine.settings.dry_run,
+        "source": "live",
+        "stats": stats,
+    }
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """Run the copy-trading engine inside the API process when enabled.
+
+    ENGINE_ENABLED=false (the default) keeps web-only deploys inert; tests use
+    that default so no test ever talks to Polymarket.
+    """
+    settings = get_settings()
+    engine: CopyEngine | None = None
+    task: asyncio.Task[None] | None = None
+    if settings.engine_enabled:
+        engine = CopyEngine(settings=settings)
+        app.state.engine = engine
+        task = asyncio.create_task(engine.run(), name="copy-engine")
+        logger.info(
+            "CopyEngine loop enabled mode=%s targets=%s poll_interval_ms=%s",
+            engine.mode,
+            len(settings.target_wallets),
+            settings.poll_interval_ms,
+        )
+    try:
+        yield
+    finally:
+        if engine is not None and task is not None:
+            logger.info("Stopping CopyEngine loop")
+            engine.stop()
+            try:
+                await asyncio.wait_for(task, timeout=5.0)
+            except asyncio.TimeoutError:
+                logger.warning("CopyEngine loop did not stop within 5s; cancelled")
+            except Exception:
+                logger.exception("CopyEngine loop crashed during shutdown")
 
 
 def _register_api_routes(app: FastAPI) -> None:
@@ -63,6 +143,9 @@ def _register_api_routes(app: FastAPI) -> None:
 
     @app.get("/api/engine/status")
     def engine_status() -> dict[str, Any]:
+        engine = getattr(app.state, "engine", None)
+        if isinstance(engine, CopyEngine):
+            return _live_engine_status(engine)
         return _get_cached_payload().engine_status
 
     @app.post("/api/demo/refresh")
@@ -85,6 +168,7 @@ def create_app() -> FastAPI:
             "for Polymarket weather prediction markets."
         ),
         version=__version__,
+        lifespan=lifespan,
     )
 
     settings = get_settings()
