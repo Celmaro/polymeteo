@@ -55,11 +55,12 @@ class PolymarketClient:
         wallets: list[str],
         market_filter: str = "weather",
     ) -> list[dict[str, Any]]:
-        """Pull recent target trades. Uses demo stream when keys/network are unavailable."""
+        """Pull recent target trades. Falls back to the demo stream only on network errors."""
         if not wallets:
             wallets = self.default_demo_wallets()
 
         # Prefer data API when reachable; otherwise emit demo signals for paper/dev.
+        rejected: list[tuple[str, int]] = []
         try:
             async with httpx.AsyncClient(timeout=6.0) as client:
                 events: list[dict[str, Any]] = []
@@ -67,6 +68,12 @@ class PolymarketClient:
                     url = f"{self.settings.data_api_host}/activity"
                     resp = await client.get(url, params={"user": wallet, "limit": 20})
                     if resp.status_code != 200:
+                        rejected.append((wallet, resp.status_code))
+                        logger.warning(
+                            "activity API rejected wallet %s (HTTP %d)",
+                            wallet,
+                            resp.status_code,
+                        )
                         continue
                     for item in resp.json():
                         title = str(item.get("title", item.get("slug", "")))
@@ -101,8 +108,14 @@ class PolymarketClient:
                         )
                 if events:
                     return events
-        except Exception as exc:
-            logger.debug("activity API unavailable (%s); using demo stream", exc)
+        except httpx.HTTPError as exc:
+            logger.debug("activity API unreachable (%s); using demo stream", exc)
+
+        if rejected:
+            codes = ", ".join(
+                f"{wallet[:10]}...={status}" for wallet, status in rejected
+            )
+            raise RuntimeError(f"activity API rejected wallets: {codes}")
 
         return self._next_demo_events(wallets)
 

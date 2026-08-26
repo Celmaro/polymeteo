@@ -1,5 +1,8 @@
 """Tests for PolymarketClient weather market detection and demo data."""
 
+import httpx
+import pytest
+
 from weather_copy_bot.polymarket.client import PolymarketClient
 
 
@@ -165,3 +168,69 @@ class TestClientInitialization:
         settings = Settings(target_wallets=["0xcustom"])
         client = PolymarketClient(settings=settings)
         assert client.settings.target_wallets == ["0xcustom"]
+
+
+class TestFetchTargetActivityHttp:
+    """HTTP behavior of fetch_target_activity against a mocked transport."""
+
+    @staticmethod
+    def _install_transport(monkeypatch, handler) -> PolymarketClient:
+        real_cls = httpx.AsyncClient
+
+        def factory(*args, **kwargs):
+            kwargs["transport"] = httpx.MockTransport(handler)
+            return real_cls(*args, **kwargs)
+
+        monkeypatch.setattr(httpx, "AsyncClient", factory)
+        return PolymarketClient()
+
+    async def test_all_wallets_rejected_raises(self, monkeypatch):
+        client = self._install_transport(
+            monkeypatch,
+            lambda request: httpx.Response(400, json={"error": "bad user"}),
+        )
+
+        with pytest.raises(RuntimeError, match="activity API rejected wallets"):
+            await client.fetch_target_activity(["0xwalletone11", "0xwallettwo22"])
+
+    async def test_partial_success_returns_real_events(self, monkeypatch):
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.params["user"] == "0xgoodwallet1":
+                return httpx.Response(
+                    200,
+                    json=[
+                        {
+                            "id": "evt-1",
+                            "title": "Highest temperature in New York?",
+                            "slug": "highest-temperature-in-new-york",
+                            "outcome": "Yes",
+                            "side": "BUY",
+                            "price": 0.61,
+                            "usdcSize": 120.5,
+                        }
+                    ],
+                )
+            return httpx.Response(400)
+
+        client = self._install_transport(monkeypatch, handler)
+
+        events = await client.fetch_target_activity(["0xbadwallet01", "0xgoodwallet1"])
+
+        assert len(events) == 1
+        assert events[0]["id"] == "evt-1"
+        assert events[0]["demo"] is False
+        assert events[0]["city"] == "New York"
+
+    async def test_connect_error_keeps_demo_fallback(self, monkeypatch):
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("offline", request=request)
+
+        client = self._install_transport(monkeypatch, handler)
+
+        events: list[dict] = []
+        for _ in range(4):
+            events = await client.fetch_target_activity(["0xdemowallet9"])
+            if events:
+                break
+
+        assert events and events[0]["demo"] is True
