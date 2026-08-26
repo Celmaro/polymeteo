@@ -1,6 +1,7 @@
 """Tests for CopyEngine signal processing and polling."""
 
 import asyncio
+import logging
 import time
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock
@@ -494,6 +495,80 @@ class TestQuorumWiring:
         assert engine.quorum._cleanup_task is not None
         await asyncio.wait_for(task, timeout=1.0)
         assert engine.quorum._cleanup_task is None
+
+
+class TestEngineEventLogging:
+    """The event trail must surface every decision instead of silence."""
+
+    @pytest.mark.asyncio
+    async def test_route_signal_logs_signal_and_copy(self, caplog):
+        engine = CopyEngine(Settings(max_copy_latency_ms=800))
+        with caplog.at_level(logging.INFO):
+            await engine._route_signal({}, _signal())
+        messages = [r.getMessage() for r in caplog.records]
+        assert any(m.startswith("SIGNAL BUY") for m in messages)
+        assert any(m.startswith("COPY BUY") for m in messages)
+        assert not any(m.startswith("SKIP") for m in messages)
+
+    @pytest.mark.asyncio
+    async def test_route_signal_logs_skip_with_reason(self, caplog):
+        engine = CopyEngine(Settings(max_copy_latency_ms=500))
+        with caplog.at_level(logging.INFO):
+            await engine._route_signal({}, _signal(latency_ms=900))
+        messages = [r.getMessage() for r in caplog.records]
+        assert any(m.startswith("SIGNAL BUY") for m in messages)
+        assert any(m.startswith("SKIP ") and "stale" in m.lower() for m in messages)
+
+    @pytest.mark.asyncio
+    async def test_consensus_logs_quorum_copy_and_skip(self, caplog):
+        limited = CopyEngine(
+            settings=Settings(max_copy_latency_ms=800),
+            risk_engine=RiskEngine(limits=RiskLimits(max_trade_size_usd=10.0)),
+            quorum=QuorumEngine(min_quorum_count=2),
+        )
+        free = CopyEngine(
+            settings=Settings(max_copy_latency_ms=800),
+            quorum=QuorumEngine(min_quorum_count=2),
+        )
+        with caplog.at_level(logging.INFO):
+            await free._route_signal({}, _signal(wallet="0xa", token_id="tok-logq"))
+            await free._route_signal({}, _signal(wallet="0xb", token_id="tok-logq"))
+            await limited._route_signal({}, _signal(wallet="0xa", token_id="tok-logs", size=200.0))
+            await limited._route_signal({}, _signal(wallet="0xb", token_id="tok-logs", size=200.0))
+        messages = [r.getMessage() for r in caplog.records]
+        assert any(m.startswith("QUORUM COPY") for m in messages)
+        assert any(m.startswith("QUORUM SKIP") and "risk" in m.lower() for m in messages)
+
+    def test_stats_snapshot_logs_all_counters(self, caplog):
+        engine = CopyEngine()
+        with caplog.at_level(logging.INFO):
+            engine._log_stats_snapshot()
+        message = next(r.getMessage() for r in caplog.records if r.getMessage().startswith("STATS"))
+        for key in (
+            "detected=",
+            "copied=",
+            "skipped=",
+            "risk_rejected=",
+            "quorum_votes=",
+            "targets=",
+            "balance=$",
+        ):
+            assert key in message
+
+    @pytest.mark.asyncio
+    async def test_run_startup_logs_target_split(self, caplog):
+        engine = CopyEngine(Settings(target_wallets=["0xs1"]))
+        engine.poll_once = AsyncMock(return_value=[])
+        with caplog.at_level(logging.INFO):
+            task = asyncio.create_task(engine.run(duration_sec=0.05))
+            await asyncio.wait_for(task, timeout=1.0)
+        startup = next(
+            r.getMessage()
+            for r in caplog.records
+            if r.getMessage().startswith("CopyEngine starting")
+        )
+        assert "static=1" in startup
+        assert "discovered=0" in startup
 
 
 class TestSeenMemoryManagement:

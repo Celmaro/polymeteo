@@ -49,7 +49,9 @@ class Settings(BaseSettings):
     discovery_interval_s: float = 30.0
     discovery_max_markets: int = 5
     discovery_trades_per_market: int = 50
-    max_discovered_targets: int = 3
+    # None promotes every qualified candidate into the polling rotation;
+    # set an integer via MAX_DISCOVERED_TARGETS to cap it explicitly.
+    max_discovered_targets: int | None = None
     min_candidate_trades: int = 3
     min_candidate_volume_usd: float = 100.0
 

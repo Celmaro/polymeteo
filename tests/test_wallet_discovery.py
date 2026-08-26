@@ -43,9 +43,7 @@ def _discovery_settings(**overrides) -> Settings:
     return Settings(**values)
 
 
-def _trade_item(
-    wallet: str, shares: float, price: float, ts: int, side: str = "BUY"
-) -> dict:
+def _trade_item(wallet: str, shares: float, price: float, ts: int, side: str = "BUY") -> dict:
     """Data-api /trades row: USD notional is derived as size * price."""
     return {
         "proxyWallet": wallet,
@@ -108,9 +106,7 @@ class TestDiscoverWeatherWalletsHttp:
         monkeypatch.setattr(httpx, "AsyncClient", factory)
         return PolymarketClient()
 
-    async def test_search_supplies_condition_ids_and_parses_observations(
-        self, monkeypatch
-    ):
+    async def test_search_supplies_condition_ids_and_parses_observations(self, monkeypatch):
         def handler(request: httpx.Request) -> httpx.Response:
             if request.url.path.endswith("/public-search"):
                 assert request.url.params["events_status"] == "active"
@@ -130,9 +126,7 @@ class TestDiscoverWeatherWalletsHttp:
             )
 
         client = self._install_transport(monkeypatch, handler)
-        obs = await client.discover_weather_wallets(
-            max_markets=3, trades_per_market=50
-        )
+        obs = await client.discover_weather_wallets(max_markets=3, trades_per_market=50)
         assert [o["wallet"] for o in obs] == ["0xnewwhale01", "0xdustwallet01"]
         assert obs[0]["size_usd"] == 250.0
         assert obs[0]["timestamp"] == 1_700_000_000.0
@@ -247,6 +241,24 @@ class TestWalletDiscoveryRegistry:
         assert disc.promoted_wallets() == ["0xhigh"]
         assert len(disc.candidates()) == 2
 
+    def test_uncapped_default_promotes_every_qualified_wallet(self):
+        settings = _discovery_settings(max_discovered_targets=None)
+        disc = WalletDiscovery(settings=settings)
+        disc.observe(
+            [
+                *self._events("0xlow", n=3, size=110.0),
+                *self._events("0xmid", n=3, size=220.0),
+                *self._events("0xhigh", n=3, size=400.0),
+            ]
+        )
+        promoted = disc.promoted_wallets()
+        assert promoted == ["0xhigh", "0xmid", "0xlow"]
+        assert len(promoted) == len(disc.candidates())
+
+    def test_settings_default_ships_without_promotion_cap(self, monkeypatch):
+        monkeypatch.delenv("MAX_DISCOVERED_TARGETS", raising=False)
+        assert Settings().max_discovered_targets is None
+
     def test_static_and_demo_wallets_never_promoted(self):
         settings = _discovery_settings(target_wallets=["0xStatic"])
         disc = WalletDiscovery(settings=settings)
@@ -322,9 +334,7 @@ class TestCopyEngineTargetProviderSeam:
     async def test_provider_wallets_drive_polling(self):
         stub = _StubClient(events=[_real_event("0xprovider")])
         provider = MergedTargetProvider(["0xstatic"])
-        engine = CopyEngine(
-            settings=_discovery_settings(), client=stub, target_provider=provider
-        )
+        engine = CopyEngine(settings=_discovery_settings(), client=stub, target_provider=provider)
         await engine.poll_once()
         assert stub.calls[0]["wallets"] == ["0xstatic"]
 
@@ -360,9 +370,7 @@ class TestWalletDiscoveryRun:
                 ]
 
         settings = _discovery_settings(discovery_interval_s=0.01)
-        disc = WalletDiscovery(
-            settings=settings, client=StubDiscoveryClient(settings)
-        )
+        disc = WalletDiscovery(settings=settings, client=StubDiscoveryClient(settings))
         await disc.run(duration_sec=0)
         assert disc.stats["cycles"] == 1
         assert disc.promoted_wallets() == ["0xloop"]

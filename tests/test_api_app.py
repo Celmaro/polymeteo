@@ -129,6 +129,33 @@ class TestEngineStatusLive:
         assert data["health"] == "starting"
         assert data["stats"]["signals_detected"] == 0
 
+    def test_status_reports_static_and_discovered_split(self):
+        from weather_copy_bot.api.app import create_app
+        from weather_copy_bot.config import Settings
+        from weather_copy_bot.engine import CopyEngine, MergedTargetProvider
+
+        class StubDiscovery:
+            def promoted_wallets(self):
+                return ["0xdisc1", "0xdisc2"]
+
+        provider = MergedTargetProvider(["0xaaa"], discovery=StubDiscovery())
+        application = create_app()
+        engine = CopyEngine(
+            Settings(dry_run=True, target_wallets=["0xaaa"]),
+            client=MagicMock(),
+            target_provider=provider,
+        )
+        engine.stats["last_heartbeat"] = None
+        application.state.engine = engine
+        client = TestClient(application, raise_server_exceptions=False)
+
+        data = client.get("/api/engine/status").json()
+        assert data["source"] == "live"
+        # Rotation merges static wallets with discovery promotions.
+        assert data["targets_active"] == 3
+        assert data["targets_static"] == 1
+        assert data["targets_discovered"] == 2
+
     def test_demo_payload_returned_without_engine(self):
         from weather_copy_bot.api.app import create_app
 
@@ -153,9 +180,7 @@ class TestEngineLifespan:
         started: list[object] = []
 
         class StubEngine:
-            def __init__(
-                self, settings, target_provider=None, quorum=None, monitor=None
-            ):
+            def __init__(self, settings, target_provider=None, quorum=None, monitor=None):
                 self.settings = settings
                 self.target_provider = target_provider
                 self.quorum = quorum
@@ -194,9 +219,7 @@ class TestEngineLifespan:
         started: list[object] = []
 
         class StubEngine:
-            def __init__(
-                self, settings, target_provider=None, quorum=None, monitor=None
-            ):
+            def __init__(self, settings, target_provider=None, quorum=None, monitor=None):
                 self.settings = settings
                 self.target_provider = target_provider
                 self.quorum = quorum

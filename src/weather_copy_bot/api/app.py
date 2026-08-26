@@ -36,6 +36,10 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
+# The poll loop fires dozens of upstream requests per second; their
+# success lines would drown out every engine event at INFO.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 
@@ -73,9 +77,17 @@ def _live_engine_status(engine: CopyEngine) -> dict[str, Any]:
                 healthy = False
     started_at = getattr(engine, "_started_at", None)
     uptime_hours = round(max(time.time() - started_at, 0.0) / 3600.0, 2) if started_at else 0.0
+    # The live rotation merges static TARGET_WALLETS with discovery
+    # promotions; report the split so the dashboard shows both sources.
+    provider = getattr(engine, "target_provider", None)
+    rotation = provider.current() if isinstance(provider, MergedTargetProvider) else None
+    static_count = len(engine.settings.target_wallets)
+    discovered_count = max(len(rotation) - static_count, 0) if rotation is not None else 0
     return {
         "mode": engine.mode,
-        "targets_active": len(engine.settings.target_wallets),
+        "targets_active": len(rotation) if rotation is not None else static_count,
+        "targets_static": static_count,
+        "targets_discovered": discovered_count,
         "poll_interval_ms": engine.settings.poll_interval_ms,
         "max_copy_latency_ms": engine.settings.max_copy_latency_ms,
         "avg_detect_to_submit_ms": round(float(stats.pop("avg_latency_ms", 0.0)), 1),
@@ -143,7 +155,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.engine = engine
         task = asyncio.create_task(engine.run(), name="copy-engine")
         logger.info(
-            "CopyEngine loop enabled mode=%s targets=%s poll_interval_ms=%s",
+            "CopyEngine loop enabled mode=%s static_targets=%s poll_interval_ms=%s",
             engine.mode,
             len(settings.target_wallets),
             settings.poll_interval_ms,

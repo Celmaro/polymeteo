@@ -137,13 +137,18 @@ class WalletDiscovery:
         return qualified
 
     def promoted_wallets(self, max_targets: int | None = None) -> list[str]:
-        """Addresses cleared for the polling rotation this instant."""
-        limit = (
-            max_targets
-            if max_targets is not None
-            else self.settings.max_discovered_targets
-        )
-        return [w.address for w in self.candidates()[:limit]]
+        """Addresses cleared for the polling rotation this instant.
+
+        With no explicit argument the settings cap applies; a settings cap of
+        None (the default) promotes every qualified candidate.
+        """
+        limit = max_targets
+        if limit is None:
+            limit = self.settings.max_discovered_targets
+        qualified = self.candidates()
+        if limit is None:
+            return [w.address for w in qualified]
+        return [w.address for w in qualified[:limit]]
 
     def status(self) -> dict[str, Any]:
         """Snapshot for the /api/discovery/status endpoint."""
@@ -194,9 +199,7 @@ class WalletDiscovery:
                 if promoted != self._last_promoted:
                     self._last_promoted = promoted
                     if promoted:
-                        logger.info(
-                            "discovery promoted targets: %s", ", ".join(promoted)
-                        )
+                        logger.info("discovery promoted targets: %s", ", ".join(promoted))
                     else:
                         logger.info("discovery promotion list now empty")
                 logger.debug(
@@ -218,10 +221,7 @@ class WalletDiscovery:
                 )
                 await asyncio.sleep(delay)
                 # Bounded runs must terminate even when every cycle fails.
-                if (
-                    duration_sec is not None
-                    and (time.time() - started) >= duration_sec
-                ):
+                if duration_sec is not None and (time.time() - started) >= duration_sec:
                     break
                 continue
             if duration_sec is not None and (time.time() - started) >= duration_sec:

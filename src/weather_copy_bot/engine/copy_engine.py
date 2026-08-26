@@ -50,6 +50,10 @@ SEEN_FILE_NAME = "copy_seen.json"
 # interval (250ms by default), so consecutive failures grow the sleep up to a cap.
 POLL_FAILURE_BACKOFF_CAP_S = 5.0
 
+# Periodic one-line summary cadence; keeps quiet stretches observable without
+# spamming per-poll noise on top of the per-signal event trail.
+STATS_LOG_INTERVAL_S = 60.0
+
 
 def _failure_backoff_delay(failures: int, base_interval_s: float) -> float:
     """Exponential backoff after consecutive poll failures, capped at 5s."""
@@ -386,7 +390,26 @@ class CopyEngine:
         quorum engine is attached, the same fill also registers as one vote;
         N distinct wallets on the same token/side fire consensus once.
         """
-        await self.process_signal(signal)
+        logger.info(
+            "SIGNAL %s %s $%.2f @ %.3f wallet=%s latency=%sms",
+            signal.side.value,
+            signal.market_slug,
+            signal.size_usd,
+            signal.price,
+            signal.target_wallet,
+            signal.latency_ms,
+        )
+        decision = await self.process_signal(signal)
+        if decision.should_copy:
+            logger.info(
+                "COPY %s %s $%.2f @ %.3f",
+                signal.side.value,
+                signal.market_slug,
+                decision.copy_size_usd,
+                signal.price,
+            )
+        else:
+            logger.info("SKIP %s (%s)", signal.market_slug, decision.reason)
         if self.quorum is None:
             return
         key = f"{signal.token_id or signal.market_slug}:{signal.side.value}"
@@ -447,6 +470,15 @@ class CopyEngine:
             result.total_size_usd,
         )
         decision = await self.process_signal(consensus_signal, skip_edge_check=True)
+        if decision.should_copy:
+            logger.info(
+                "QUORUM COPY %s $%.2f @ %.3f",
+                result.side,
+                decision.copy_size_usd,
+                result.vwap_price,
+            )
+        else:
+            logger.info("QUORUM SKIP %s (%s)", result.side, decision.reason)
         if not decision.should_copy and self.monitor is not None:
             self.monitor.record_quorum_skip(decision.reason)
 
@@ -496,18 +528,39 @@ class CopyEngine:
         except Exception:
             logger.warning("Failed to persist seen store at %s", path, exc_info=True)
 
+    def _log_stats_snapshot(self) -> None:
+        """One-line periodic summary so quiet stretches stay observable."""
+        s = self.stats
+        logger.info(
+            "STATS detected=%s copied=%s skipped=%s risk_rejected=%s "
+            "quorum_votes=%s reached=%s rejected=%s targets=%s balance=$%.2f",
+            s["signals_detected"],
+            s["copied"],
+            s["skipped"],
+            s["risk_rejections"],
+            s["quorum_votes"],
+            s["quorum_reached"],
+            s["quorum_rejected"],
+            len(self._resolve_wallets()),
+            self._balance,
+        )
+
     async def run(self, duration_sec: float | None = None) -> None:
         self._running = True
         self._started_at = time.time()
         if self.quorum is not None:
             self.quorum.start_cleanup_task()
+        wallets = self._resolve_wallets()
         logger.info(
-            "CopyEngine starting mode=%s targets=%s max_latency=%sms",
+            "CopyEngine starting mode=%s targets=%s static=%s discovered=%s max_latency=%sms",
             self.mode,
-            len(self.settings.target_wallets) or "demo",
+            len(wallets),
+            len(self.settings.target_wallets),
+            max(len(wallets) - len(self.settings.target_wallets), 0),
             self.settings.max_copy_latency_ms,
         )
         started = time.time()
+        last_stats_log = started
         interval = self.settings.poll_interval_ms / 1000.0
         consecutive_failures = 0
         try:
@@ -515,6 +568,10 @@ class CopyEngine:
                 try:
                     await self.poll_once()
                     consecutive_failures = 0
+                    now_s = time.time()
+                    if now_s - last_stats_log >= STATS_LOG_INTERVAL_S:
+                        last_stats_log = now_s
+                        self._log_stats_snapshot()
                 except Exception:
                     consecutive_failures += 1
                     delay = _failure_backoff_delay(consecutive_failures, interval)
