@@ -25,6 +25,7 @@ from pathlib import Path
 from weather_copy_bot.backtest.engine import CopyBacktester
 from weather_copy_bot.config import Settings, get_settings
 from weather_copy_bot.engine.order_queue import OrderQueue
+from weather_copy_bot.engine.wallet_discovery import MergedTargetProvider
 from weather_copy_bot.live.risk_engine import Position, RiskEngine
 from weather_copy_bot.models import CopyDecision, Side, TradeSignal
 from weather_copy_bot.paper.trader import PaperTrader
@@ -63,6 +64,7 @@ class CopyEngine:
         client: PolymarketClient | None = None,
         on_decision: SignalHandler | None = None,
         risk_engine: RiskEngine | None = None,
+        target_provider: MergedTargetProvider | None = None,
     ):
         self.settings = settings or get_settings()
         self.client = client or PolymarketClient(self.settings)
@@ -71,6 +73,10 @@ class CopyEngine:
         self.order_queue = OrderQueue()
         self.risk: RiskEngine | None = risk_engine or RiskEngine()
         self.on_decision = on_decision
+        # When set, the polling rotation comes from the provider each cycle
+        # (static TARGET_WALLETS merged with promoted discoveries); when None,
+        # behavior stays exactly as before (settings, else demo fallback).
+        self.target_provider = target_provider
 
         # Engine-owned account state, folded back into the risk engine after
         # every fill so breakers/daily-loss/exposure checks see reality.
@@ -293,14 +299,25 @@ class CopyEngine:
         self.stats["live_orders_filled"] += 1
         return result if isinstance(result, dict) else {"status": "filled"}
 
+    def _resolve_wallets(self) -> list[str]:
+        """Static TARGET_WALLETS merged with promoted discoveries, or demo fallback."""
+        if self.target_provider is not None:
+            return self.target_provider.current()
+        return self.settings.target_wallets or self.client.default_demo_wallets()
+
     async def poll_once(self) -> list[TradeSignal]:
         """Poll target activity and convert fresh fills into copy signals."""
         started = time.perf_counter()
         self._load_seen()
         now_ts = time.time()
         self._prune_seen(now_ts)
+        wallets = self._resolve_wallets()
+        if self.target_provider is not None and not wallets:
+            # Provider-managed mode must never leak into the demo stream.
+            self.stats["last_heartbeat"] = datetime.now(timezone.utc).isoformat()
+            return []
         events = await self.client.fetch_target_activity(
-            wallets=self.settings.target_wallets or self.client.default_demo_wallets(),
+            wallets=wallets,
             market_filter=self.settings.market_filter,
         )
         fresh: list[TradeSignal] = []

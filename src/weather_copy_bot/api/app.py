@@ -24,7 +24,11 @@ from weather_copy_bot.demo_data import (
     export_demo_json,
     load_dashboard_payload,
 )
-from weather_copy_bot.engine import CopyEngine
+from weather_copy_bot.engine import (
+    CopyEngine,
+    MergedTargetProvider,
+    WalletDiscovery,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -92,8 +96,26 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
     engine: CopyEngine | None = None
     task: asyncio.Task[None] | None = None
+    discovery: WalletDiscovery | None = None
+    discovery_task: asyncio.Task[None] | None = None
+
+    # Discovery starts before the engine so promotions are visible from the
+    # very first poll of the merged rotation.
+    if settings.wallet_discovery_enabled:
+        discovery = WalletDiscovery(settings=settings)
+        app.state.discovery = discovery
+        discovery_task = asyncio.create_task(discovery.run(), name="wallet-discovery")
+        logger.info(
+            "WalletDiscovery loop enabled interval_s=%s max_markets=%s",
+            settings.discovery_interval_s,
+            settings.discovery_max_markets,
+        )
     if settings.engine_enabled:
-        engine = CopyEngine(settings=settings)
+        provider = MergedTargetProvider(
+            static_wallets=settings.target_wallets,
+            discovery=discovery,
+        )
+        engine = CopyEngine(settings=settings, target_provider=provider)
         app.state.engine = engine
         task = asyncio.create_task(engine.run(), name="copy-engine")
         logger.info(
@@ -114,6 +136,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 logger.warning("CopyEngine loop did not stop within 5s; cancelled")
             except Exception:
                 logger.exception("CopyEngine loop crashed during shutdown")
+        if discovery is not None and discovery_task is not None:
+            logger.info("Stopping WalletDiscovery loop")
+            discovery.stop()
+            try:
+                await asyncio.wait_for(discovery_task, timeout=5.0)
+            except asyncio.TimeoutError:
+                logger.warning("WalletDiscovery loop did not stop within 5s; cancelled")
+            except Exception:
+                logger.exception("WalletDiscovery loop crashed during shutdown")
 
 
 def _register_api_routes(app: FastAPI) -> None:
@@ -147,6 +178,13 @@ def _register_api_routes(app: FastAPI) -> None:
         if isinstance(engine, CopyEngine):
             return _live_engine_status(engine)
         return _get_cached_payload().engine_status
+
+    @app.get("/api/discovery/status")
+    def discovery_status() -> dict[str, Any]:
+        disc = getattr(app.state, "discovery", None)
+        if isinstance(disc, WalletDiscovery):
+            return disc.status()
+        return {"enabled": False}
 
     @app.post("/api/demo/refresh")
     def refresh_demo() -> dict[str, Any]:

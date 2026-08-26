@@ -119,6 +119,71 @@ class PolymarketClient:
 
         return self._next_demo_events(wallets)
 
+    async def discover_weather_wallets(
+        self,
+        max_markets: int = 5,
+        trades_per_market: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Scan public trades on active weather markets for candidate wallets.
+
+        Resolves live weather markets from gamma to conditionIds, then queries
+        the data-api activity feed per market WITHOUT a user filter so trades
+        from any address appear. Returns raw observations for ranking in
+        engine.wallet_discovery. Raises only when every market query is
+        rejected, mirroring fetch_target_activity's contract.
+        """
+        markets = await self.fetch_weather_markets()
+        targets: list[tuple[str, str]] = []
+        for market in markets:
+            condition_id = market.get("conditionId")
+            if condition_id:
+                targets.append((str(condition_id), str(market.get("slug", "weather"))))
+            if len(targets) >= max_markets:
+                break
+
+        rejected: list[int] = []
+        observations: list[dict[str, Any]] = []
+        try:
+            async with httpx.AsyncClient(timeout=6.0) as client:
+                for condition_id, slug in targets:
+                    url = f"{self.settings.data_api_host}/activity"
+                    resp = await client.get(
+                        url,
+                        params={"market": condition_id, "limit": trades_per_market},
+                    )
+                    if resp.status_code != 200:
+                        rejected.append(resp.status_code)
+                        logger.warning(
+                            "activity API rejected market scan %s (HTTP %d)",
+                            slug,
+                            resp.status_code,
+                        )
+                        continue
+                    for item in resp.json():
+                        wallet = str(item.get("proxyWallet", "")).strip().lower()
+                        size_usd = float(item.get("usdcSize", 0.0) or 0.0)
+                        if not wallet or size_usd <= 0:
+                            continue
+                        observations.append(
+                            {
+                                "wallet": wallet,
+                                "timestamp": float(item.get("timestamp", 0.0) or 0.0),
+                                "size_usd": size_usd,
+                                "market_slug": str(item.get("slug", slug)),
+                                "side": "BUY"
+                                if str(item.get("side", "BUY")).upper() == "BUY"
+                                else "SELL",
+                            }
+                        )
+        except httpx.HTTPError as exc:
+            logger.debug("discovery activity feed unreachable (%s)", exc)
+
+        if targets and len(rejected) == len(targets):
+            codes = ", ".join(str(code) for code in sorted(set(rejected)))
+            raise RuntimeError(f"discovery activity feed rejected all markets: {codes}")
+
+        return observations
+
     async def place_order(
         self,
         token_id: str,

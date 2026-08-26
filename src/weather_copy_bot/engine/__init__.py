@@ -31,6 +31,11 @@ from weather_copy_bot.engine.twap_depth_aware import (
     TWAPSlicerDepthAware,
     create_depth_aware_twap,
 )
+from weather_copy_bot.engine.wallet_discovery import (
+    DiscoveredWallet,
+    MergedTargetProvider,
+    WalletDiscovery,
+)
 from weather_copy_bot.engine.wallet_filter import (
     WalletMetadata,
     WeatherTagFilter,
@@ -45,8 +50,10 @@ __all__ = [
     "DepthAwareExecution",
     "DepthAwareStatus",
     "DepthSlice",
+    "DiscoveredWallet",
     "LiquidityEstimate",
     "LiquidityEstimator",
+    "MergedTargetProvider",
     "Order",
     "OrderQueue",
     "OrderState",
@@ -59,6 +66,7 @@ __all__ = [
     "TWAPSlicer",
     "TWAPSlicerDepthAware",
     "WalletCategory",
+    "WalletDiscovery",
     "WalletMetadata",
     "WalletTradeSignal",
     "WeatherTagFilter",

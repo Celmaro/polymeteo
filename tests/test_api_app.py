@@ -153,8 +153,9 @@ class TestEngineLifespan:
         started: list[object] = []
 
         class StubEngine:
-            def __init__(self, settings):
+            def __init__(self, settings, target_provider=None):
                 self.settings = settings
+                self.target_provider = target_provider
                 self.mode = "paper"
                 self.stats = {}
                 self._running = False
@@ -177,6 +178,54 @@ class TestEngineLifespan:
             assert application.state.engine._running is True
         # Shutdown joined the loop: stop() flipped the flag.
         assert application.state.engine._running is False
+
+    def test_lifespan_starts_discovery_alongside_engine(self, monkeypatch):
+        import sys
+
+        from weather_copy_bot.engine import MergedTargetProvider, WalletDiscovery
+
+        app_module = sys.modules["weather_copy_bot.api.app"]
+        monkeypatch.setenv("ENGINE_ENABLED", "true")
+        monkeypatch.setenv("WALLET_DISCOVERY_ENABLED", "true")
+        started: list[object] = []
+
+        class StubEngine:
+            def __init__(self, settings, target_provider=None):
+                self.settings = settings
+                self.target_provider = target_provider
+                self.mode = "paper"
+                self.stats = {}
+                self._running = False
+
+            async def run(self):
+                self._running = True
+                started.append(self)
+                while self._running:
+                    await asyncio.sleep(0.01)
+
+            def stop(self):
+                self._running = False
+
+        monkeypatch.setattr(app_module, "CopyEngine", StubEngine)
+        application = app_module.create_app()
+        with TestClient(application) as client:
+            assert client.get("/api/health").status_code == 200
+            assert len(started) == 1
+            discovery = getattr(application.state, "discovery", None)
+            assert isinstance(discovery, WalletDiscovery)
+            provider = started[0].target_provider
+            assert isinstance(provider, MergedTargetProvider)
+            assert provider.discovery is discovery
+            # The engine consumes static + discovered targets through one seam.
+            assert started[0].target_provider.static == []
+        assert application.state.discovery._running is False
+
+    def test_discovery_status_disabled_by_default(self):
+        from weather_copy_bot.api.app import create_app
+
+        application = create_app()
+        client = TestClient(application)
+        assert client.get("/api/discovery/status").json() == {"enabled": False}
 
     def test_lifespan_skips_engine_by_default(self):
         from weather_copy_bot.api.app import create_app

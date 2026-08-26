@@ -42,6 +42,17 @@ class Settings(BaseSettings):
     # production opts in explicitly via ENGINE_ENABLED=true.
     engine_enabled: bool = False
 
+    # Automatic wallet discovery scans public activity on active weather
+    # markets to promote new copy targets alongside TARGET_WALLETS. Defaults
+    # to False so deploys opt in explicitly via WALLET_DISCOVERY_ENABLED=true.
+    wallet_discovery_enabled: bool = False
+    discovery_interval_s: float = 30.0
+    discovery_max_markets: int = 5
+    discovery_trades_per_market: int = 50
+    max_discovered_targets: int = 3
+    min_candidate_trades: int = 3
+    min_candidate_volume_usd: float = 100.0
+
     api_host: str = "0.0.0.0"
     api_port: int = 8000
     cors_origins: list[str] = Field(
