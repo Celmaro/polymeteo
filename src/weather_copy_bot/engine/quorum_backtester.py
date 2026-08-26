@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from ..db import DatabaseManager
-from .quorum import QuorumEngine, QuorumResult, WalletCategory, WalletTradeSignal
+from .quorum import QuorumEngine, QuorumResult, WalletTradeSignal
 
 logger = logging.getLogger(__name__)
 
@@ -21,10 +21,8 @@ class BacktestConfig:
     """Configuration for quorum backtest."""
 
     min_quorum_count: int = 2
-    min_weighted_score: float = 2.0
     window_seconds: int = 600
     max_acceptable_price: float = 0.85
-    max_slippage_bps: int = 50
     include_wallet_filter: bool = True
     min_weather_score: float = 0.3
 
@@ -35,11 +33,11 @@ class BacktestSignal:
 
     signal_id: str
     wallet_address: str
-    wallet_category: WalletCategory
     token_id: str
     side: str
     price: float
     timestamp: datetime
+    size_usd: float = 0.0
     market_title: str | None = None
 
 
@@ -64,7 +62,6 @@ class BacktestResult:
     max_drawdown: float
     avg_latency_ms: float
     avg_quorum_time_seconds: float
-    pnl_by_category: dict[str, float]
     pnl_by_side: dict[str, float]
 
 
@@ -96,10 +93,8 @@ class QuorumBacktester:
         # Initialize quorum engine with config
         self._quorum_engine = QuorumEngine(
             min_quorum_count=self.config.min_quorum_count,
-            min_weighted_score=self.config.min_weighted_score,
             window_seconds=self.config.window_seconds,
             max_acceptable_price=self.config.max_acceptable_price,
-            max_slippage_bps=self.config.max_slippage_bps,
             clock=lambda: self._backtest_now,
         )
 
@@ -112,7 +107,6 @@ class QuorumBacktester:
             "orders_executed": 0,
             "orders_profitable": 0,
             "orders_losing": 0,
-            "pnl_by_category": defaultdict(float),
             "pnl_by_side": defaultdict(float),
             "latencies": [],
             "quorum_times": [],
@@ -131,10 +125,10 @@ class QuorumBacktester:
         return WalletTradeSignal(
             signal_id=bt_signal.signal_id,
             wallet_address=bt_signal.wallet_address,
-            wallet_category=bt_signal.wallet_category,
             token_id=bt_signal.token_id,
             side=bt_signal.side,
             entry_price=bt_signal.price,
+            size_usd=bt_signal.size_usd,
             timestamp=bt_signal.timestamp.timestamp(),
         )
 
@@ -158,14 +152,10 @@ class QuorumBacktester:
 
         if consensus.side.upper() == "BUY":
             # Long position: profit if exit > entry
-            pnl = (
-                position_size * (exit_price - consensus.consensus_price) / consensus.consensus_price
-            )
+            pnl = position_size * (exit_price - consensus.vwap_price) / consensus.vwap_price
         else:
             # Short position: profit if exit < entry
-            pnl = (
-                position_size * (consensus.consensus_price - exit_price) / consensus.consensus_price
-            )
+            pnl = position_size * (consensus.vwap_price - exit_price) / consensus.vwap_price
 
         return pnl
 
@@ -240,8 +230,7 @@ class QuorumBacktester:
                         self._stats["max_consecutive_losses"], self._stats["consecutive_losses"]
                     )
 
-                # P&L by category and side
-                self._stats["pnl_by_category"][signal.wallet_category.value] += pnl
+                # P&L by side
                 self._stats["pnl_by_side"][signal.side.upper()] += pnl
 
                 # Track drawdown
@@ -249,7 +238,7 @@ class QuorumBacktester:
 
                 logger.info(
                     f"[Backtest] Quorum hit: {signal.token_id} "
-                    f"{signal.side} @ {consensus.consensus_price:.4f}, "
+                    f"{signal.side} @ {consensus.vwap_price:.4f}, "
                     f"P&L: ${pnl:.2f}, Balance: ${self._balance:.2f}"
                 )
             else:
@@ -281,7 +270,6 @@ class QuorumBacktester:
             / len(self._stats["quorum_times"])
             if self._stats["quorum_times"]
             else 0,
-            pnl_by_category=dict(self._stats["pnl_by_category"]),
             pnl_by_side=dict(self._stats["pnl_by_side"]),
         )
 
@@ -376,7 +364,6 @@ def generate_synthetic_signals(
 
     wallets = [f"0x{i:040x}" for i in range(num_wallets)]
     tokens = [f"TOKEN_{i}" for i in range(num_tokens)]
-    categories = list(WalletCategory)
     sides = ["BUY", "SELL"]
 
     signals = []
@@ -391,10 +378,10 @@ def generate_synthetic_signals(
         signal = BacktestSignal(
             signal_id=f"SIG_{i}",
             wallet_address=random.choice(wallets),
-            wallet_category=random.choice(categories),
             token_id=random.choice(tokens),
             side=random.choice(sides),
             price=random.uniform(0.1, 0.9),
+            size_usd=random.uniform(50, 5000),
             timestamp=timestamp,
             market_title="Weather market" if random.random() > 0.3 else "Non-weather market",
         )

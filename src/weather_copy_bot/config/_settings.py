@@ -53,6 +53,16 @@ class Settings(BaseSettings):
     min_candidate_trades: int = 3
     min_candidate_volume_usd: float = 100.0
 
+    # Consensus quorum: when N distinct target wallets take the same token/side
+    # within the window, one copy fires at the size-weighted average price.
+    # Every wallet counts equally (no category weights); size shapes the entry
+    # price only. Defaults to False so web-only deploys and tests never fire
+    # consensus; production opts in explicitly via QUORUM_ENABLED=true.
+    quorum_enabled: bool = False
+    quorum_min_count: int = 2
+    quorum_window_seconds: int = 600
+    quorum_max_acceptable_price: float = 0.85
+
     api_host: str = "0.0.0.0"
     api_port: int = 8000
     cors_origins: list[str] = Field(

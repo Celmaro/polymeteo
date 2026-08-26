@@ -75,7 +75,6 @@ class QuorumLimits:
     """Quorum trading limits."""
 
     min_quorum_count: int = 2
-    min_quorum_score: float = 2.0
     max_quorum_age_seconds: int = 600  # 10 minutes
 
 
@@ -157,7 +156,6 @@ class RiskLimits:
                 ),
                 quorum=QuorumLimits(
                     min_quorum_count=3,
-                    min_quorum_score=3.0,
                 ),
             ),
             RiskLevel.MODERATE: cls(
@@ -186,7 +184,6 @@ class RiskLimits:
                 ),
                 quorum=QuorumLimits(
                     min_quorum_count=2,
-                    min_quorum_score=2.0,
                 ),
             ),
             RiskLevel.AGGRESSIVE: cls(
@@ -215,7 +212,6 @@ class RiskLimits:
                 ),
                 quorum=QuorumLimits(
                     min_quorum_count=2,
-                    min_quorum_score=2.0,
                 ),
             ),
         }
@@ -300,7 +296,6 @@ class RiskLimits:
             },
             "quorum": {
                 "min_count": self.quorum.min_quorum_count,
-                "min_score": self.quorum.min_quorum_score,
             },
         }
 

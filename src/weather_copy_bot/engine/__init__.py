@@ -7,7 +7,6 @@ from weather_copy_bot.engine.order_queue import (
 from weather_copy_bot.engine.quorum import (
     QuorumEngine,
     QuorumResult,
-    WalletCategory,
     WalletTradeSignal,
 )
 from weather_copy_bot.engine.quorum_backtester import (
@@ -65,7 +64,6 @@ __all__ = [
     "TWAPSlice",
     "TWAPSlicer",
     "TWAPSlicerDepthAware",
-    "WalletCategory",
     "WalletDiscovery",
     "WalletMetadata",
     "WalletTradeSignal",

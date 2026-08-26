@@ -109,8 +109,12 @@ class CopyBacktester:
             max_copy_latency_ms=self.settings.max_copy_latency_ms,
         )
 
-    def decide(self, signal: TradeSignal) -> CopyDecision:
-        """Make a copy decision for a signal."""
+    def decide(self, signal: TradeSignal, *, skip_edge_check: bool = False) -> CopyDecision:
+        """Make a copy decision for a signal.
+
+        skip_edge_check bypasses ONLY the thin-edge heuristic; consensus
+        agreement substitutes for it, while staleness and size checks apply.
+        """
         p = self.params
 
         # Check latency
@@ -130,9 +134,10 @@ class CopyBacktester:
             return CopyDecision(signal=signal, should_copy=False, reason="size_too_small")
 
         # Edge calculation
-        edge_bps = abs(0.5 - signal.price) * 10_000 * 0.15
-        if edge_bps < p.min_edge_bps:
-            return CopyDecision(signal=signal, should_copy=False, reason="thin_edge")
+        if not skip_edge_check:
+            edge_bps = abs(0.5 - signal.price) * 10_000 * 0.15
+            if edge_bps < p.min_edge_bps:
+                return CopyDecision(signal=signal, should_copy=False, reason="thin_edge")
 
         # Slippage estimate
         slippage = max(4.0, signal.latency_ms * 0.02)

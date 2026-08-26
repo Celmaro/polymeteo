@@ -21,15 +21,20 @@ import uuid
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from weather_copy_bot.backtest.engine import CopyBacktester
 from weather_copy_bot.config import Settings, get_settings
 from weather_copy_bot.engine.order_queue import OrderQueue
+from weather_copy_bot.engine.quorum import QuorumEngine, QuorumResult, WalletTradeSignal
 from weather_copy_bot.engine.wallet_discovery import MergedTargetProvider
 from weather_copy_bot.live.risk_engine import Position, RiskEngine
 from weather_copy_bot.models import CopyDecision, Side, TradeSignal
 from weather_copy_bot.paper.trader import PaperTrader
 from weather_copy_bot.polymarket.client import PolymarketClient
+
+if TYPE_CHECKING:
+    from weather_copy_bot.ops.monitoring import MonitoringService
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +70,8 @@ class CopyEngine:
         on_decision: SignalHandler | None = None,
         risk_engine: RiskEngine | None = None,
         target_provider: MergedTargetProvider | None = None,
+        quorum: QuorumEngine | None = None,
+        monitor: MonitoringService | None = None,
     ):
         self.settings = settings or get_settings()
         self.client = client or PolymarketClient(self.settings)
@@ -77,6 +84,14 @@ class CopyEngine:
         # (static TARGET_WALLETS merged with promoted discoveries); when None,
         # behavior stays exactly as before (settings, else demo fallback).
         self.target_provider = target_provider
+        # Optional consensus layer: distinct wallet votes on the same token/side
+        # aggregate and fire exactly once at quorum. The optional monitor gets
+        # quorum hit/skip hooks; both are duck-typed to keep tests light.
+        self.quorum = quorum
+        self.monitor = monitor
+        # Market context per consensus key so the consensus signal minted when
+        # wallet B completes the quorum still carries market A's metadata.
+        self._quorum_meta: dict[str, dict[str, str]] = {}
 
         # Engine-owned account state, folded back into the risk engine after
         # every fill so breakers/daily-loss/exposure checks see reality.
@@ -100,6 +115,9 @@ class CopyEngine:
             "avg_latency_ms": 0.0,
             "last_heartbeat": None,
             "risk_rejections": 0,
+            "quorum_votes": 0,
+            "quorum_reached": 0,
+            "quorum_rejected": 0,
             "live_orders_filled": 0,
             "live_orders_failed": 0,
             "live_orders_duplicated": 0,
@@ -112,10 +130,12 @@ class CopyEngine:
             return "live"
         return "paper"
 
-    async def process_signal(self, signal: TradeSignal) -> CopyDecision:
+    async def process_signal(
+        self, signal: TradeSignal, *, skip_edge_check: bool = False
+    ) -> CopyDecision:
         self.stats["signals_detected"] += 1
 
-        decision = self.policy.decide(signal)
+        decision = self.policy.decide(signal, skip_edge_check=skip_edge_check)
         self._apply_risk_gate(decision)
 
         if decision.should_copy:
@@ -351,13 +371,84 @@ class CopyEngine:
                 token_id=event.get("token_id"),
             )
             fresh.append(signal)
-            await self.process_signal(signal)
+            await self._route_signal(event, signal)
 
         self.stats["last_heartbeat"] = datetime.now(timezone.utc).isoformat()
         self._save_seen()
         elapsed_ms = (time.perf_counter() - started) * 1000
         logger.debug("poll_once processed=%s elapsed_ms=%.1f", len(fresh), elapsed_ms)
         return fresh
+
+    async def _route_signal(self, event: dict, signal: TradeSignal) -> None:
+        """Process an individual fill, then feed the consensus buffer.
+
+        Every fresh fill is copied (or skipped) exactly as before. When a
+        quorum engine is attached, the same fill also registers as one vote;
+        N distinct wallets on the same token/side fire consensus once.
+        """
+        await self.process_signal(signal)
+        if self.quorum is None:
+            return
+        key = f"{signal.token_id or signal.market_slug}:{signal.side.value}"
+        self._quorum_meta[key] = {
+            "market_slug": signal.market_slug,
+            "market_title": signal.market_title,
+            "city": signal.city,
+            "outcome": signal.outcome,
+        }
+        result = self.quorum.register_signal(
+            WalletTradeSignal(
+                wallet_address=signal.target_wallet,
+                token_id=signal.token_id or signal.market_slug,
+                side=signal.side.value,
+                entry_price=signal.price,
+                size_usd=signal.size_usd,
+            )
+        )
+        qstats = self.quorum.get_stats()
+        self.stats["quorum_votes"] = qstats["signals_received"]
+        self.stats["quorum_reached"] = qstats["quorum_reached"]
+        self.stats["quorum_rejected"] = qstats["quorum_rejected"]
+        if result is not None:
+            if self.monitor is not None:
+                self.monitor.record_quorum_hit()
+            await self._process_consensus(result)
+
+    async def _process_consensus(self, result: QuorumResult) -> None:
+        """Turn one fired consensus into a single fresh copy decision.
+
+        The consensus signal is born now (latency 0), so the staleness gate
+        passes naturally, and skip_edge_check lets the agreement itself stand
+        in for the thin-edge heuristic.
+        """
+        meta = self._quorum_meta.get(f"{result.token_id}:{result.side}", {})
+        now = datetime.now(timezone.utc)
+        consensus_signal = TradeSignal(
+            signal_id=str(uuid.uuid4()),
+            target_wallet=f"quorum({result.quorum_size})",
+            market_slug=str(meta.get("market_slug") or result.token_id),
+            market_title=str(meta.get("market_title") or "Consensus"),
+            city=str(meta.get("city") or "Unknown"),
+            outcome=str(meta.get("outcome") or "Yes"),
+            side=Side(result.side),
+            price=result.vwap_price,
+            size_usd=result.total_size_usd,
+            detected_at=now,
+            target_filled_at=now,
+            latency_ms=0,
+            token_id=result.token_id,
+        )
+        logger.info(
+            "QUORUM %s %s wallets=%s vwap=%.3f size=$%.2f",
+            result.side,
+            result.token_id[:16],
+            result.quorum_size,
+            result.vwap_price,
+            result.total_size_usd,
+        )
+        decision = await self.process_signal(consensus_signal, skip_edge_check=True)
+        if not decision.should_copy and self.monitor is not None:
+            self.monitor.record_quorum_skip(decision.reason)
 
     def _remember(self, key: str, ts: float) -> None:
         self._seen.add(key)
@@ -408,6 +499,8 @@ class CopyEngine:
     async def run(self, duration_sec: float | None = None) -> None:
         self._running = True
         self._started_at = time.time()
+        if self.quorum is not None:
+            self.quorum.start_cleanup_task()
         logger.info(
             "CopyEngine starting mode=%s targets=%s max_latency=%sms",
             self.mode,
@@ -417,24 +510,28 @@ class CopyEngine:
         started = time.time()
         interval = self.settings.poll_interval_ms / 1000.0
         consecutive_failures = 0
-        while self._running:
-            try:
-                await self.poll_once()
-                consecutive_failures = 0
-            except Exception:
-                consecutive_failures += 1
-                delay = _failure_backoff_delay(consecutive_failures, interval)
-                logger.exception(
-                    "poll_once failed consecutive=%s backing_off=%.2fs",
-                    consecutive_failures,
-                    delay,
-                )
-                await asyncio.sleep(delay)
-                continue
-            if duration_sec is not None and (time.time() - started) >= duration_sec:
-                break
-            await asyncio.sleep(interval)
-        self._running = False
+        try:
+            while self._running:
+                try:
+                    await self.poll_once()
+                    consecutive_failures = 0
+                except Exception:
+                    consecutive_failures += 1
+                    delay = _failure_backoff_delay(consecutive_failures, interval)
+                    logger.exception(
+                        "poll_once failed consecutive=%s backing_off=%.2fs",
+                        consecutive_failures,
+                        delay,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                if duration_sec is not None and (time.time() - started) >= duration_sec:
+                    break
+                await asyncio.sleep(interval)
+        finally:
+            if self.quorum is not None:
+                await self.quorum.stop_cleanup_task()
+            self._running = False
 
     def stop(self) -> None:
         self._running = False

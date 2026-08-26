@@ -17,6 +17,7 @@ from weather_copy_bot.engine.copy_engine import (
     _seen_store_path,
 )
 from weather_copy_bot.engine.order_queue import OrderQueue
+from weather_copy_bot.engine.quorum import QuorumEngine
 from weather_copy_bot.live.risk_engine import RiskEngine, RiskLimits
 from weather_copy_bot.models import CopyDecision, Side, TradeSignal
 from weather_copy_bot.paper.trader import PaperTrader
@@ -405,6 +406,94 @@ class TestOrderQueueWiring:
         assert d2.reason == "order_rate_limited"
         assert engine.stats["live_orders_throttled"] == 1
         engine.client.place_order.assert_awaited_once()
+
+
+class _FakeQuorumMonitor:
+    """Duck-typed MonitoringService capturing quorum hooks."""
+
+    def __init__(self):
+        self.hits = 0
+        self.skips: list[str] = []
+
+    def record_quorum_hit(self):
+        self.hits += 1
+
+    def record_quorum_skip(self, reason):
+        self.skips.append(reason)
+
+
+class TestQuorumWiring:
+    """Equal-weight consensus must flow through the standard copy pipeline."""
+
+    def _engine(self, **kwargs):
+        settings = kwargs.pop("settings", Settings(max_copy_latency_ms=800, copy_ratio=0.25))
+        return CopyEngine(settings=settings, **kwargs)
+
+    @pytest.mark.asyncio
+    async def test_first_vote_buffers_and_copies_individually(self):
+        engine = self._engine(quorum=QuorumEngine(min_quorum_count=2))
+        await engine._route_signal({}, _signal(wallet="0xa", token_id="tok-q"))
+        assert engine.stats["copied"] == 1
+        assert engine.stats["quorum_votes"] == 1
+        assert engine.stats["quorum_reached"] == 0
+        assert len(engine.quorum.get_buffer_status()) == 1
+
+    @pytest.mark.asyncio
+    async def test_second_wallet_fires_one_consensus_copy_at_vwap(self):
+        captured: list[tuple[TradeSignal, CopyDecision]] = []
+
+        async def on_decision(signal, decision):
+            captured.append((signal, decision))
+
+        engine = self._engine(on_decision=on_decision, quorum=QuorumEngine(min_quorum_count=2))
+        await engine._route_signal(
+            {}, _signal(wallet="0xa", token_id="tok-q", price=0.40, size=300.0)
+        )
+        await engine._route_signal(
+            {}, _signal(wallet="0xb", token_id="tok-q", price=0.60, size=100.0)
+        )
+
+        consensus = [(s, d) for s, d in captured if s.target_wallet.startswith("quorum")]
+        assert len(consensus) == 1
+        signal, decision = consensus[0]
+        assert signal.target_wallet == "quorum(2)"
+        assert signal.price == pytest.approx(0.45)
+        assert signal.size_usd == pytest.approx(400.0)
+        assert signal.latency_ms == 0
+        assert decision.should_copy is True
+        assert engine.stats["quorum_reached"] == 1
+
+    @pytest.mark.asyncio
+    async def test_repeat_wallet_vote_never_triggers_consensus(self):
+        engine = self._engine(quorum=QuorumEngine(min_quorum_count=2))
+        await engine._route_signal({}, _signal(wallet="0xa", token_id="tok-dupq"))
+        await engine._route_signal({}, _signal(wallet="0xa", token_id="tok-dupq"))
+        assert engine.stats["quorum_reached"] == 0
+        assert engine.quorum.get_stats()["duplicate_signals"] == 1
+
+    @pytest.mark.asyncio
+    async def test_monitor_hooks_capture_hits_and_skips(self):
+        monitor = _FakeQuorumMonitor()
+        engine = self._engine(
+            risk_engine=RiskEngine(limits=RiskLimits(max_trade_size_usd=10.0)),
+            quorum=QuorumEngine(min_quorum_count=2),
+            monitor=monitor,
+        )
+        await engine._route_signal({}, _signal(wallet="0xa", token_id="tok-skip", size=200.0))
+        await engine._route_signal({}, _signal(wallet="0xb", token_id="tok-skip", size=200.0))
+        assert monitor.hits == 1
+        assert len(monitor.skips) == 1
+        assert "risk" in monitor.skips[0]
+
+    @pytest.mark.asyncio
+    async def test_run_lifecycle_stops_quorum_cleanup_task(self):
+        engine = self._engine(quorum=QuorumEngine())
+        engine.poll_once = AsyncMock(return_value=[])
+        task = asyncio.create_task(engine.run(duration_sec=0.1))
+        await asyncio.sleep(0.05)
+        assert engine.quorum._cleanup_task is not None
+        await asyncio.wait_for(task, timeout=1.0)
+        assert engine.quorum._cleanup_task is None
 
 
 class TestSeenMemoryManagement:

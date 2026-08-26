@@ -1,241 +1,201 @@
-"""Quorum Engine: Sliding Window Consensus for Copy Trading.
+"""Consensus engine aggregating wallet trades into copy decisions.
 
-Implements a consensus-based signal aggregation system that waits for
-multiple wallets to agree on a trade before executing.
+Every tracked wallet is smart money by definition, so all votes carry equal
+weight; trade notional (``size_usd``) only shapes the consensus entry price
+(VWAP), never the vote count. A consensus fires exactly once per
+``(token_id, side)`` key when ``min_quorum_count`` distinct wallets agree
+inside ``window_seconds`` at a size-weighted average price at or below
+``max_acceptable_price``.
 """
 
 import asyncio
-import logging
+import contextlib
 import time
 from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from enum import Enum
 from uuid import uuid4
-
-logger = logging.getLogger(__name__)
-
-
-class WalletCategory(str, Enum):
-    """Categories for wallet weighting."""
-
-    SMART_BOT = "smart_bot"  # Weight: 1.5
-    WHALE = "whale"  # Weight: 0.8
-    SMART_TRADER = "smart_trader"  # Weight: 1.2
-    REGULAR = "regular"  # Weight: 1.0
 
 
 @dataclass
 class WalletTradeSignal:
-    """A trade signal from a target wallet."""
+    """A single observed wallet trade acting as one consensus vote."""
 
     signal_id: str = field(default_factory=lambda: str(uuid4()))
     wallet_address: str = ""
-    wallet_category: WalletCategory = WalletCategory.REGULAR
     token_id: str = ""
-    side: str = ""  # BUY or SELL
+    side: str = ""
     entry_price: float = 0.0
+    size_usd: float = 0.0  # Notional of the vote; drives VWAP, not vote count
     timestamp: float = field(default_factory=time.time)
 
-    @property
-    def weight(self) -> float:
-        """Get weight based on wallet category."""
-        weights = {
-            WalletCategory.SMART_BOT: 1.5,
-            WalletCategory.WHALE: 0.8,
-            WalletCategory.SMART_TRADER: 1.2,
-            WalletCategory.REGULAR: 1.0,
-        }
-        return weights.get(self.wallet_category, 1.0)
 
-
-@dataclass
+@dataclass(frozen=True)
 class QuorumResult:
-    """Result when quorum is reached."""
+    """Consensus outcome for one ``(token_id, side)`` key."""
 
-    token_id: str
-    side: str
-    quorum_size: int
-    weighted_score: float
-    wallets: list[str]
-    categories: list[WalletCategory]
-    avg_price: float
-    consensus_price: float
+    token_id: str = ""
+    side: str = ""
+    quorum_size: int = 0
+    wallets: tuple[str, ...] = ()
+    vwap_price: float = 0.0
+    total_size_usd: float = 0.0
+    window_start: float = 0.0
 
 
 class QuorumEngine:
-    """Sliding window consensus engine for copy trading signals."""
+    """Buffers equal-weight votes per ``(token_id, side)`` and emits consensuses.
+
+    The clock is injectable so replays can drive windows deterministically
+    without waiting real time.
+    """
 
     def __init__(
         self,
         min_quorum_count: int = 2,
-        min_weighted_score: float = 2.0,
-        window_seconds: int = 600,  # 10 minutes
+        window_seconds: float = 600.0,
         max_acceptable_price: float = 0.85,
-        max_slippage_bps: int = 50,  # 0.5%
         clock: Callable[[], float] | None = None,
-    ):
-        """
-        Initialize QuorumEngine.
-
-        Args:
-            min_quorum_count: Minimum number of unique wallets required
-            min_weighted_score: Minimum sum of weights to reach consensus
-            window_seconds: Time window for signal aggregation
-            max_acceptable_price: Don't execute if price above this
-            max_slippage_bps: Max acceptable slippage in basis points
-            clock: Time source; defaults to wall clock. Injectable so the
-                backtester can replay historical timestamps.
-        """
+    ) -> None:
         self.min_quorum_count = min_quorum_count
-        self.min_weighted_score = min_weighted_score
         self.window_seconds = window_seconds
         self.max_acceptable_price = max_acceptable_price
-        self.max_slippage_bps = max_slippage_bps
-        self._clock = clock or time.time
+        self._clock: Callable[[], float] = clock or time.time
 
-        # Signal buffer: {(token_id, side): [WalletTradeSignal, ...]}
-        self._buffer: dict[str, list[WalletTradeSignal]] = defaultdict(list)
-
-        # Executed tokens (idempotency)
-        self._executed: set[str] = set()
-
-        # Stats
-        self._stats = self._empty_stats()
-
-    def _make_key(self, token_id: str, side: str) -> str:
-        """Create buffer key."""
-        return f"{token_id}_{side.upper()}"
-
-    def _cleanup_expired(self, key: str, current_time: float) -> int:
-        """Remove expired signals from buffer."""
-        before = len(self._buffer[key])
-        self._buffer[key] = [
-            sig for sig in self._buffer[key] if current_time - sig.timestamp <= self.window_seconds
-        ]
-        expired = before - len(self._buffer[key])
-        self._stats["signals_expired"] += expired
-        return expired
-
-    def _cleanup_all_expired(self, current_time: float) -> None:
-        """Clean up all expired signals."""
-        for key in list(self._buffer.keys()):
-            self._cleanup_expired(key, current_time)
+        self._buffers: dict[str, list[WalletTradeSignal]] = defaultdict(list)
+        # Executed-key map is TTL-pruned so idempotency memory stays bounded.
+        self._executed: dict[str, float] = {}
+        # Buffer size at last price rejection; prevents double counting the
+        # same composition on every re-evaluation.
+        self._price_reject_len: dict[str, int] = {}
+        self._stats: dict[str, int] = self._empty_stats()
+        self._cleanup_task: asyncio.Task | None = None
 
     def register_signal(self, signal: WalletTradeSignal) -> QuorumResult | None:
-        """
-        Register a wallet signal and check for quorum.
-
-        Args:
-            signal: The wallet trade signal to register
-
-        Returns:
-            QuorumResult if quorum is reached, None otherwise
-        """
+        """Buffer one vote; return a QuorumResult exactly once per key."""
         self._stats["signals_received"] += 1
-        current_time = self._clock()
+        now = self._clock()
+        key = f"{signal.token_id}:{signal.side}"
 
-        key = self._make_key(signal.token_id, signal.side)
+        # Prune first so freshly-aged-out execution locks release promptly.
+        self._expire_stale(now)
 
-        # Check idempotency
         if key in self._executed:
             self._stats["duplicate_signals"] += 1
-            logger.debug(f"Signal rejected: already executed for {key}")
             return None
 
-        # Cleanup expired signals
-        self._cleanup_expired(key, current_time)
-
-        # Check for duplicate wallet
-        existing_wallets = {s.wallet_address for s in self._buffer[key]}
-        if signal.wallet_address in existing_wallets:
+        buffer = self._buffers[key]
+        if any(vote.wallet_address == signal.wallet_address for vote in buffer):
             self._stats["duplicate_signals"] += 1
-            logger.debug(f"Signal rejected: duplicate wallet {signal.wallet_address[:8]}")
             return None
 
-        # Add signal to buffer
-        self._buffer[key].append(signal)
+        buffer.append(signal)
         self._stats["signals_buffered"] += 1
 
-        signals = self._buffer[key]
+        if len(buffer) < self.min_quorum_count:
+            return None
 
-        logger.info(
-            f"[Quorum] {len(signals)}/{self.min_quorum_count} signals for {key} "
-            f"({signal.wallet_category.value} - {signal.wallet_address[:8]}...)"
-        )
-
-        # Check quorum conditions
-        if self._check_quorum(key, signals):
-            result = self._create_consensus(key, signals)
-            self._executed.add(key)
+        result = self._evaluate(buffer)
+        if result is not None:
+            self._buffers.pop(key, None)
+            self._price_reject_len.pop(key, None)
+            self._executed[key] = now
             self._stats["quorum_reached"] += 1
-
-            logger.info(
-                f"[Quorum] ✅ CONSENSUS REACHED! {result.quorum_size} wallets, "
-                f"score={result.weighted_score:.2f}, price={result.consensus_price:.4f}"
-            )
             return result
 
+        # Count each distinct buffer composition's price failure once.
+        if self._price_reject_len.get(key) != len(buffer):
+            self._price_reject_len[key] = len(buffer)
+            self._stats["quorum_rejected"] += 1
         return None
 
-    def _check_quorum(self, key: str, signals: list[WalletTradeSignal]) -> bool:
-        """Check if quorum conditions are met."""
-        # Condition 1: Minimum number of unique wallets
-        if len(signals) < self.min_quorum_count:
-            return False
+    def start_cleanup_task(self, interval: float = 60.0) -> None:
+        """Spawn the background expiry loop if not already running."""
+        if self._cleanup_task is None or self._cleanup_task.done():
+            self._cleanup_task = asyncio.create_task(self.run_cleanup_task(interval))
 
-        # Condition 2: Minimum weighted score
-        weighted_sum = sum(s.weight for s in signals)
-        if weighted_sum < self.min_weighted_score:
-            logger.debug(f"Weighted score {weighted_sum:.2f} < {self.min_weighted_score}")
-            return False
+    async def stop_cleanup_task(self) -> None:
+        """Cancel the background expiry loop, if running."""
+        if self._cleanup_task is not None:
+            self._cleanup_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._cleanup_task
+            self._cleanup_task = None
 
-        # Condition 3: Price check
-        avg_price = sum(s.entry_price for s in signals) / len(signals)
-        if avg_price > self.max_acceptable_price:
-            logger.warning(f"Quorum reached but price too high: {avg_price:.4f}")
-            self._stats["quorum_rejected"] += 1
-            return False
+    async def run_cleanup_task(self, interval: float = 60.0) -> None:
+        """Periodically expire stale buffers using the injected clock."""
+        while True:
+            await asyncio.sleep(interval)
+            self._expire_stale(self._clock())
 
-        return True
+    def get_stats(self) -> dict[str, int]:
+        """Return cumulative counters plus bounded-map sizes."""
+        return {**self._stats, "executed_keys": len(self._executed)}
 
-    def _create_consensus(self, key: str, signals: list[WalletTradeSignal]) -> QuorumResult:
-        """Create consensus result from signals."""
-        avg_price = sum(s.entry_price for s in signals) / len(signals)
-        weighted_score = sum(s.weight for s in signals)
+    def get_buffer_status(self) -> list[dict]:
+        """Snapshot pending buffers; injected clock keeps replays consistent."""
+        now = self._clock()
+        status = []
+        for _key, votes in sorted(self._buffers.items()):
+            oldest = min(v.timestamp for v in votes)
+            status.append(
+                {
+                    "token_id": votes[0].token_id,
+                    "side": votes[0].side,
+                    "votes": len(votes),
+                    "vwap_price": round(self._vwap(votes), 6),
+                    "total_size_usd": round(sum(v.size_usd for v in votes), 2),
+                    "time_remaining_seconds": max(
+                        0.0, round(oldest + self.window_seconds - now, 3)
+                    ),
+                }
+            )
+        return status
 
+    def _evaluate(self, votes: list[WalletTradeSignal]) -> QuorumResult | None:
+        """Apply the price gate; the count condition is checked by the caller."""
+        vwap = self._vwap(votes)
+        if vwap <= 0 or vwap > self.max_acceptable_price:
+            return None
         return QuorumResult(
-            token_id=signals[0].token_id,
-            side=signals[0].side,
-            quorum_size=len(signals),
-            weighted_score=weighted_score,
-            wallets=[s.wallet_address for s in signals],
-            categories=[s.wallet_category for s in signals],
-            avg_price=avg_price,
-            consensus_price=avg_price,
+            token_id=votes[0].token_id,
+            side=votes[0].side,
+            quorum_size=len(votes),
+            wallets=tuple(v.wallet_address for v in votes),
+            vwap_price=round(vwap, 6),
+            total_size_usd=round(sum(v.size_usd for v in votes), 2),
+            window_start=min(v.timestamp for v in votes),
         )
 
-    def get_buffer_status(self, token_id: str, side: str) -> dict:
-        """Get current buffer status for a token/side."""
-        key = self._make_key(token_id, side)
-        signals = self._buffer.get(key, [])
+    @staticmethod
+    def _vwap(votes: list[WalletTradeSignal]) -> float:
+        """Size-weighted average entry; plain mean when sizes are unknown."""
+        total_size = sum(v.size_usd for v in votes)
+        if total_size > 0:
+            return sum(v.entry_price * v.size_usd for v in votes) / total_size
+        return sum(v.entry_price for v in votes) / len(votes)
 
-        return {
-            "token_id": token_id,
-            "side": side,
-            "signal_count": len(signals),
-            "weighted_score": sum(s.weight for s in signals),
-            "min_required": self.min_quorum_count,
-            "weight_required": self.min_weighted_score,
-            "executed": key in self._executed,
-            "time_remaining": max(0, self.window_seconds - (time.time() - signals[0].timestamp))
-            if signals
-            else self.window_seconds,
-        }
+    def _expire_stale(self, now: float) -> None:
+        """Drop expired votes and prune the executed-key map."""
+        cutoff = now - self.window_seconds
+        expired = 0
+        for key in list(self._buffers):
+            fresh = [v for v in self._buffers[key] if v.timestamp >= cutoff]
+            expired += len(self._buffers[key]) - len(fresh)
+            if fresh:
+                self._buffers[key] = fresh
+            else:
+                del self._buffers[key]
+        if expired:
+            self._stats["signals_expired"] += expired
+
+        exec_cutoff = now - self.window_seconds * 2
+        for key in [k for k, ts in self._executed.items() if ts < exec_cutoff]:
+            del self._executed[key]
+            self._price_reject_len.pop(key, None)
 
     @staticmethod
-    def _empty_stats() -> dict:
-        """Zeroed statistics shared by __init__ and reset."""
+    def _empty_stats() -> dict[str, int]:
         return {
             "signals_received": 0,
             "signals_buffered": 0,
@@ -244,25 +204,3 @@ class QuorumEngine:
             "quorum_rejected": 0,
             "duplicate_signals": 0,
         }
-
-    def reset(self) -> None:
-        """Reset the engine state."""
-        self._buffer.clear()
-        self._executed.clear()
-        self._stats = self._empty_stats()
-        logger.info("[Quorum] Engine reset")
-
-    def get_stats(self) -> dict:
-        """Get engine statistics."""
-        return {
-            **self._stats,
-            "buffer_size": sum(len(v) for v in self._buffer.values()),
-            "executed_count": len(self._executed),
-        }
-
-    async def run_cleanup_task(self, interval: int = 60) -> None:
-        """Background task to cleanup expired signals."""
-        while True:
-            await asyncio.sleep(interval)
-            self._cleanup_all_expired(time.time())
-            logger.debug(f"[Quorum] Cleanup: {self.get_stats()}")

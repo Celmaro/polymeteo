@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import ClassVar
 
-from .quorum import WalletCategory, WalletTradeSignal
+from .quorum import WalletTradeSignal
 
 logger = logging.getLogger(__name__)
 
@@ -103,7 +103,6 @@ class WalletMetadata:
     """Metadata for a tracked wallet."""
 
     address: str
-    category: WalletCategory
     name: str | None = None
     tags: set[str] = None
     first_seen: datetime = None
@@ -115,7 +114,6 @@ class WalletMetadata:
             self.tags = set()
         if self.first_seen is None:
             self.first_seen = datetime.now(timezone.utc)
-
 
 
 class WeatherWalletFilter:
@@ -155,19 +153,17 @@ class WeatherWalletFilter:
     def register_wallet(
         self,
         address: str,
-        category: WalletCategory,
         name: str | None = None,
         tags: set[str] | None = None,
     ) -> WalletMetadata:
-        """Register a wallet to track."""
+        """Register a wallet to track. Every wallet counts equally."""
         metadata = WalletMetadata(
             address=address.lower(),
-            category=category,
             name=name,
             tags=tags or set(),
         )
         self._wallets[address.lower()] = metadata
-        logger.info(f"[Filter] Registered wallet: {address[:8]}... ({category.value})")
+        logger.info(f"[Filter] Registered wallet: {address[:8]}...")
         return metadata
 
     def unregister_wallet(self, address: str) -> bool:
@@ -204,27 +200,16 @@ class WeatherWalletFilter:
         # Get wallet metadata
         wallet = self._wallets.get(signal.wallet_address.lower())
 
-        # Score based on multiple factors
+        # Score based on content signals only; every wallet counts equally.
         score = 0.0
         reasons = []
 
-        # 1. Wallet category weight
-        if wallet:
-            category_scores = {
-                WalletCategory.SMART_BOT: 0.4,
-                WalletCategory.SMART_TRADER: 0.3,
-                WalletCategory.WHALE: 0.2,
-                WalletCategory.REGULAR: 0.1,
-            }
-            score += category_scores.get(wallet.category, 0.1)
-            reasons.append(f"category:{wallet.category.value}")
-
-        # 2. Market title keyword matching
+        # 1. Market title keyword matching
         if market_title:
             title_lower = market_title.lower()
             matched_tags = self.tag_filter.WEATHER_TAGS.intersection(set(title_lower.split()))
             if matched_tags:
-                tag_bonus = min(len(matched_tags) * 0.15, 0.45)
+                tag_bonus = min(len(matched_tags) * 0.25, 0.60)
                 score += tag_bonus
                 reasons.append(f"tags:{matched_tags}")
 
@@ -269,8 +254,10 @@ class WeatherWalletFilter:
         """
         Filter a signal and return it if weather-related, None otherwise.
         """
-        if self.is_wallet_tracked(signal.wallet_address) and self.classify_signal(signal, market_title, token_id):
-                return signal
+        if self.is_wallet_tracked(signal.wallet_address) and self.classify_signal(
+            signal, market_title, token_id
+        ):
+            return signal
         return None
 
     def get_wallet_stats(self, address: str) -> dict | None:
@@ -281,7 +268,6 @@ class WeatherWalletFilter:
 
         return {
             "address": wallet.address,
-            "category": wallet.category.value,
             "name": wallet.name,
             "trades_count": wallet.trades_count,
             "weather_trades_count": wallet.weather_trades_count,

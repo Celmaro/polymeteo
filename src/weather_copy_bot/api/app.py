@@ -27,8 +27,10 @@ from weather_copy_bot.demo_data import (
 from weather_copy_bot.engine import (
     CopyEngine,
     MergedTargetProvider,
+    QuorumEngine,
     WalletDiscovery,
 )
+from weather_copy_bot.ops.monitoring import MonitoringService
 
 logging.basicConfig(
     level=logging.INFO,
@@ -81,6 +83,7 @@ def _live_engine_status(engine: CopyEngine) -> dict[str, Any]:
         "health": "healthy" if healthy else "starting",
         "running": running,
         "dry_run": engine.settings.dry_run,
+        "quorum_enabled": engine.quorum is not None,
         "source": "live",
         "stats": stats,
     }
@@ -115,7 +118,28 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             static_wallets=settings.target_wallets,
             discovery=discovery,
         )
-        engine = CopyEngine(settings=settings, target_provider=provider)
+        quorum_engine: QuorumEngine | None = None
+        if settings.quorum_enabled:
+            quorum_engine = QuorumEngine(
+                min_quorum_count=settings.quorum_min_count,
+                window_seconds=float(settings.quorum_window_seconds),
+                max_acceptable_price=settings.quorum_max_acceptable_price,
+            )
+            logger.info(
+                "Quorum consensus enabled min_count=%s window_s=%s max_price=%s",
+                settings.quorum_min_count,
+                settings.quorum_window_seconds,
+                settings.quorum_max_acceptable_price,
+            )
+        # Unstarted service: only its quorum hit/skip counters are driven by
+        # the engine hooks; none of its background loops run.
+        monitor = MonitoringService() if quorum_engine is not None else None
+        engine = CopyEngine(
+            settings=settings,
+            target_provider=provider,
+            quorum=quorum_engine,
+            monitor=monitor,
+        )
         app.state.engine = engine
         task = asyncio.create_task(engine.run(), name="copy-engine")
         logger.info(

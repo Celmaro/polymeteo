@@ -153,9 +153,13 @@ class TestEngineLifespan:
         started: list[object] = []
 
         class StubEngine:
-            def __init__(self, settings, target_provider=None):
+            def __init__(
+                self, settings, target_provider=None, quorum=None, monitor=None
+            ):
                 self.settings = settings
                 self.target_provider = target_provider
+                self.quorum = quorum
+                self.monitor = monitor
                 self.mode = "paper"
                 self.stats = {}
                 self._running = False
@@ -190,9 +194,13 @@ class TestEngineLifespan:
         started: list[object] = []
 
         class StubEngine:
-            def __init__(self, settings, target_provider=None):
+            def __init__(
+                self, settings, target_provider=None, quorum=None, monitor=None
+            ):
                 self.settings = settings
                 self.target_provider = target_provider
+                self.quorum = quorum
+                self.monitor = monitor
                 self.mode = "paper"
                 self.stats = {}
                 self._running = False
