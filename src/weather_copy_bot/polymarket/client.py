@@ -136,23 +136,38 @@ class PolymarketClient:
         try:
             async with httpx.AsyncClient(timeout=6.0) as client:
                 for keyword in self.settings.weather_keywords:
-                    resp = await client.get(
-                        f"{self.settings.gamma_host}/public-search",
-                        params={
-                            "q": keyword,
-                            "events_status": "active",
-                            "limit_per_type": 10,
-                        },
-                    )
-                    if resp.status_code != 200:
+                    # Any single bad response (transport error, non-JSON body,
+                    # unexpected shape) only skips its keyword; discovery then
+                    # falls through to the windowed scan if nothing was found.
+                    try:
+                        resp = await client.get(
+                            f"{self.settings.gamma_host}/public-search",
+                            params={
+                                "q": keyword,
+                                "events_status": "active",
+                                "limit_per_type": 10,
+                            },
+                        )
+                        if resp.status_code != 200:
+                            logger.debug(
+                                "gamma public-search rejected keyword %s (HTTP %d)",
+                                keyword,
+                                resp.status_code,
+                            )
+                            continue
+                        body = resp.json()
+                    except Exception as exc:
                         logger.debug(
-                            "gamma public-search rejected keyword %s (HTTP %d)",
-                            keyword,
-                            resp.status_code,
+                            "gamma public-search query %r failed (%s)", keyword, exc
                         )
                         continue
-                    for event in resp.json().get("events") or []:
+                    events = body.get("events", []) if isinstance(body, dict) else []
+                    for event in events:
+                        if not isinstance(event, dict):
+                            continue
                         for market in event.get("markets") or []:
+                            if not isinstance(market, dict):
+                                continue
                             condition_id = str(market.get("conditionId") or "").strip()
                             if (
                                 not condition_id

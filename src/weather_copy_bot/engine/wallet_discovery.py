@@ -97,6 +97,8 @@ class WalletDiscovery:
             "cycles": 0,
             "observations": 0,
             "last_cycle_at": None,
+            "consecutive_failures": 0,
+            "last_error": None,
         }
 
     def observe(self, events: Iterable[dict[str, Any]]) -> int:
@@ -184,6 +186,8 @@ class WalletDiscovery:
                 )
                 touched = self.observe(events)
                 consecutive_failures = 0
+                self.stats["consecutive_failures"] = 0
+                self.stats["last_error"] = None
                 self.stats["cycles"] += 1
                 self.stats["last_cycle_at"] = datetime.now(timezone.utc).isoformat()
                 promoted = tuple(self.promoted_wallets())
@@ -200,8 +204,10 @@ class WalletDiscovery:
                     touched,
                     len(self._wallets),
                 )
-            except Exception:
+            except Exception as exc:
                 consecutive_failures += 1
+                self.stats["consecutive_failures"] = consecutive_failures
+                self.stats["last_error"] = f"{type(exc).__name__}: {exc}"[:200]
                 delay = _backoff_delay(
                     consecutive_failures, interval, DISCOVERY_FAILURE_BACKOFF_CAP_S
                 )
@@ -211,6 +217,12 @@ class WalletDiscovery:
                     delay,
                 )
                 await asyncio.sleep(delay)
+                # Bounded runs must terminate even when every cycle fails.
+                if (
+                    duration_sec is not None
+                    and (time.time() - started) >= duration_sec
+                ):
+                    break
                 continue
             if duration_sec is not None and (time.time() - started) >= duration_sec:
                 break

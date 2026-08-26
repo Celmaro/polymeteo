@@ -132,6 +132,26 @@ class TestDiscoverWeatherWalletsHttp:
         assert obs[0]["size_usd"] == 250.0
         assert obs[0]["timestamp"] == 1_700_000_000.0
 
+    async def test_search_survives_invalid_json_from_one_keyword(self, monkeypatch):
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("/public-search"):
+                keyword = request.url.params["q"]
+                if keyword == "temperature":
+                    # Production fault shape: 200 with an HTML challenge body.
+                    return httpx.Response(200, text="<html>request blocked</html>")
+                if keyword == "weather":
+                    return httpx.Response(200, json=_search_events())
+                return httpx.Response(200, json={"events": []})
+            assert request.url.params["market"] == "0xcond1"
+            return httpx.Response(
+                200,
+                json=[_activity_item("0xResilient01", 250.0, 1_700_000_003)],
+            )
+
+        client = self._install_transport(monkeypatch, handler)
+        obs = await client.discover_weather_wallets()
+        assert [o["wallet"] for o in obs] == ["0xresilient01"]
+
     async def test_falls_back_to_windowed_scan_when_search_is_empty(self, monkeypatch):
         def handler(request: httpx.Request) -> httpx.Response:
             if request.url.path.endswith("/public-search"):
@@ -325,3 +345,20 @@ class TestWalletDiscoveryRun:
         await disc.run(duration_sec=0)
         assert disc.stats["cycles"] == 1
         assert disc.promoted_wallets() == ["0xloop"]
+
+    async def test_run_survives_persistent_failures_and_reports_stats(self):
+        class ExplodingClient(PolymarketClient):
+            async def discover_weather_wallets(
+                self, max_markets: int = 5, trades_per_market: int = 50
+            ):
+                raise RuntimeError("search index unavailable")
+
+        settings = _discovery_settings(discovery_interval_s=0.01)
+        disc = WalletDiscovery(settings=settings, client=ExplodingClient(settings))
+        await disc.run(duration_sec=0.05)
+        assert disc._running is False
+        assert disc.stats["cycles"] == 0
+        assert disc.stats["consecutive_failures"] >= 1
+        assert disc.stats["last_error"] is not None
+        assert "RuntimeError" in disc.stats["last_error"]
+        assert "unavailable" in disc.stats["last_error"]
