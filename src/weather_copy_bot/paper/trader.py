@@ -31,26 +31,43 @@ class PaperLedger:
 
 
 class PaperTrader:
-    """Stateful paper account driven by detected target signals."""
+    """Stateful paper account driven by detected target signals.
 
-    def __init__(self, settings: Settings | None = None):
+    Markout economics (base markup, latency decay, fee rate) come from the
+    shared StrategyParams via ``policy`` so paper results stay consistent
+    with backtest and live behavior instead of drifting on local constants.
+    """
+
+    def __init__(
+        self,
+        settings: Settings | None = None,
+        policy: CopyBacktester | None = None,
+    ):
         self.settings = settings or get_settings()
-        self.policy = CopyBacktester(self.settings)
+        self.policy = policy or CopyBacktester(self.settings)
         self.ledger = PaperLedger(
             starting_balance=self.settings.paper_starting_balance,
             balance=self.settings.paper_starting_balance,
         )
 
     def on_signal(self, signal: TradeSignal) -> CopyDecision:
+        """Decide and simulate in one step (standalone convenience path)."""
         decision = self.policy.decide(signal)
+        self.simulate(decision)
+        return decision
+
+    def simulate(self, decision: CopyDecision) -> Fill | None:
+        """Simulate the fill for an already-approved decision."""
         self.ledger.decisions.append(decision)
         if not decision.should_copy:
-            return decision
+            return None
 
-        latency_penalty = signal.latency_ms / 1000.0 * 0.011
+        params = self.policy.params
+        signal = decision.signal
+        latency_penalty = signal.latency_ms / 1000.0 * params.latency_decay_rate
         direction = 1.0 if signal.side == Side.BUY else -1.0
-        markout = (0.034 - latency_penalty) * direction
-        pnl = decision.copy_size_usd * markout - decision.copy_size_usd * 0.002
+        markout = (params.base_markup - latency_penalty) * direction
+        pnl = decision.copy_size_usd * (markout - params.fee_rate)
         self.ledger.balance += pnl
         self.ledger.peak = max(self.ledger.peak, self.ledger.balance)
         dd = ((self.ledger.balance - self.ledger.peak) / self.ledger.peak) * 100.0
@@ -66,7 +83,7 @@ class PaperTrader:
             side=signal.side,
             price=signal.price,
             size_usd=decision.copy_size_usd,
-            fee_usd=round(decision.copy_size_usd * 0.002, 4),
+            fee_usd=round(decision.copy_size_usd * params.fee_rate, 4),
             pnl_usd=round(pnl, 4),
             latency_ms=signal.latency_ms,
             filled_at=signal.detected_at,
@@ -81,7 +98,7 @@ class PaperTrader:
                 drawdown_pct=round(dd, 2),
             )
         )
-        return decision
+        return fill
 
     def summary(self) -> PerformanceSummary:
         return summarize_fills(
