@@ -27,7 +27,7 @@ jobs:
             ${{ runner.os }}-pip-
 
       - name: Install dependencies
-        run: pip install -r requirements-dev.txt
+        run: pip install -r requirements-dev.txt --extra-index-url https://download.pytorch.org/whl/cpu
 
       - name: Run tests
         run: pytest tests/ -v --cov=src/weather_copy_bot --cov-report=xml
@@ -70,7 +70,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu
 
       - name: Check syntax
         run: python -m py_compile src/weather_copy_bot/**/*.py
