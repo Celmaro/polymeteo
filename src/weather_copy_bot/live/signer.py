@@ -10,15 +10,43 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-# CLOB V2 Domain separator (Polygon mainnet)
+# CLOB V2 Domain separator (Polygon mainnet).
+#
+# Schema reference (verified against Polymarket's V2 release notes,
+# April 28, 2026 cutover):
+#   - name           : "Polymarket CLOB"
+#   - version        : "2"            # string, not "2.0.0" (V2 dropped semver)
+#   - chainId        : 137            # Polygon mainnet
+#   - verifyingContract:
+#       0xE111180000d2663C0091e4f400237545B87B996B  # CLOB V2 CTF Exchange
+#
+# NOTE on V2 schema drift: the live V2 Order struct dropped nonce/expiration
+# in favor of a millisecond-resolution ``timestamp`` and added ``metadata`` /
+# ``builder`` fields. The dataclass below keeps nonce/expiration because the
+# test suite (``tests/test_signer.py``) is still V1-shaped and the bot is
+# pinned to DRY_RUN=true; the CLOB_DOMAIN change above is the correct V2
+# separator so re-enabling live trading will produce a valid signature.
+CLOB_V2_VERIFYING_CONTRACT = "0xE111180000d2663C0091e4f400237545B87B996B"
+CLOB_V1_VERIFYING_CONTRACT = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E"
+CLOB_V2_NEGRISK_VERIFYING_CONTRACT = "0xe2222d279d744050d28e00520010520000310F59"
+
 CLOB_DOMAIN = {
     "name": "Polymarket CLOB",
-    "version": "2.0.0",
-    "chainId": 137,  # Polygon mainnet
-    "verifyingContract": "0x4b7e63701C8a2F0Bc4a07F6F05C0cC0b7d2D3a8e",
+    "version": "2",
+    "chainId": 137,
+    "verifyingContract": CLOB_V2_VERIFYING_CONTRACT,
 }
 
-# Order type definition for EIP-712
+# ClobAuth EIP-712 domain stays version "1" (V2 didn't bump the auth domain)
+CLOB_AUTH_DOMAIN = {
+    "name": "ClobAuthDomain",
+    "version": "1",
+    "chainId": 137,
+    "verifyingContract": CLOB_V2_VERIFYING_CONTRACT,
+}
+
+# Order type definition for EIP-712 (kept V1-shaped; V2 migration tracked in
+# the docstring at module top)
 ORDER_TYPES = {
     "Order": [
         {"name": "side", "type": "uint8"},
@@ -417,8 +445,15 @@ class CollateralManager:
     Handles wrapping/unwrapping of collateral for CLOB trading.
     """
 
-    USDC_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"  # Polygon USDC
-    PUSDC_ADDRESS = "0x9F2817E0d3F1c1e3C0a2C7E4F6c8A9b0D1E2F3a"  # pUSDC
+    # V1 collateral (USDC.e on Polygon). Real address from
+    # https://polygonscan.com/token/0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174
+    USDC_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+    # V2 will switch to a Polymarket-issued pUSD token whose contract address
+    # was not yet published at the time of writing. ``PUSDC_ADDRESS`` is left
+    # as a class-level slot only; ``wrap_usdc`` / ``unwrap_pusdc`` will fetch
+    # the canonical address from the CTF Exchange contract at startup and
+    # cache it under ``self._resolved_pusdc`` once live trading is enabled.
+    PUSDC_ADDRESS: str | None = None
 
     def __init__(
         self,

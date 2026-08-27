@@ -676,3 +676,57 @@ class TestPollFailureBackoff:
         asyncio.run(_scenario())
 
         assert engine._running is False
+
+
+class TestRateLimitObserver:
+    """The engine must surface upstream 429s as a stat counter (so the
+    operator dashboard can see throttling events instead of silently dropping
+    wallets) and must bump ``signals_by_reason`` for every skipped signal so
+    the histogram explains why signals didn't get copied.
+    """
+
+    def test_initial_stats_have_new_fields(self):
+        engine = CopyEngine()
+        assert "upstream_429_rejections" in engine.stats
+        assert engine.stats["upstream_429_rejections"] == 0
+        assert "signals_by_reason" in engine.stats
+        assert engine.stats["signals_by_reason"] == {}
+
+    def test_record_rate_limit_increments_counter(self):
+        engine = CopyEngine()
+        engine.record_rate_limit("gamma-api.polymarket.com", 30.0)
+        assert engine.stats["upstream_429_rejections"] == 1
+        assert engine.stats["signals_by_reason"]["upstream_429"] == 1
+
+    def test_record_rate_limit_compounds(self):
+        engine = CopyEngine()
+        engine.record_rate_limit("gamma-api.polymarket.com", 1.0)
+        engine.record_rate_limit("data-api.polymarket.com", 1.0)
+        engine.record_rate_limit("gamma-api.polymarket.com", 5.0)
+        assert engine.stats["upstream_429_rejections"] == 3
+        assert engine.stats["signals_by_reason"]["upstream_429"] == 3
+
+    @pytest.mark.asyncio
+    async def test_skip_bumps_signals_by_reason(self):
+        engine = CopyEngine(Settings(max_copy_latency_ms=500))
+        # Stale latency triggers ``should_copy=False`` with reason "stale".
+        await engine.process_signal(_signal(latency_ms=900))
+        assert engine.stats["skipped"] == 1
+        assert engine.stats["signals_by_reason"]["stale"] == 1
+
+    def test_engine_wires_itself_as_observer_on_init(self):
+        engine = CopyEngine()
+        # The constructor attaches ``record_rate_limit`` to the client so
+        # every 429 reaches the engine regardless of how the client was built.
+        # Bound methods compare equal by ``(__self__, __func__)`` even though
+        # they are freshly-created objects on each attribute access, so use
+        # ``==`` (and assert the binding survives into the engine's counter).
+        assert engine.client._on_rate_limit == engine.record_rate_limit
+        assert engine.client._on_rate_limit.__self__ is engine
+        assert engine.client._on_rate_limit.__func__ is CopyEngine.record_rate_limit
+
+        # Functional guarantee: invoking the wired observer mutates the
+        # engine's stats without any extra glue from the caller.
+        before = engine.stats["upstream_429_rejections"]
+        engine.client._on_rate_limit("gamma-api.polymarket.com", 12.5)
+        assert engine.stats["upstream_429_rejections"] == before + 1

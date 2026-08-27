@@ -1,4 +1,12 @@
-"""Polymarket data + order adapters with a safe demo fallback."""
+"""Polymarket data + order adapters with a safe demo fallback.
+
+The client surface stays compatible with the ``monkeypatch.setattr(httpx,
+"AsyncClient", factory)`` test pattern by always going through
+``httpx.AsyncClient`` for the wire request while the rate limiter + observer
+hook run in front of it. This keeps existing tests green while still
+preventing the production poll loop from spamming gamma/data into a 429
+spiral.
+"""
 
 from __future__ import annotations
 
@@ -10,15 +18,41 @@ import httpx
 import numpy as np
 
 from weather_copy_bot.config import Settings, get_settings
+from weather_copy_bot.polymarket.rate_limiter import (
+    RateLimitObserver,
+    get_data_bucket,
+    get_gamma_bucket,
+)
 
 logger = logging.getLogger(__name__)
 
 
 class PolymarketClient:
-    def __init__(self, settings: Settings | None = None):
+    def __init__(
+        self,
+        settings: Settings | None = None,
+        on_rate_limit: RateLimitObserver | None = None,
+    ):
         self.settings = settings or get_settings()
         self._demo_cursor = 0
         self._rng = np.random.default_rng(7)
+        self._on_rate_limit = on_rate_limit
+
+    async def _notify_rate_limit(self, host: str, retry_after: float) -> None:
+        """Forward 429 events to the engine's observer (if one is wired)."""
+        if self._on_rate_limit is None:
+            return
+        try:
+            await self._on_rate_limit(host, retry_after)
+        except Exception as exc:  # pragma: no cover - observer errors must not break poll
+            logger.debug("rate-limit observer raised %s", exc)
+
+    @staticmethod
+    def _record_429(bucket, response: httpx.Response, host: str) -> float:
+        """Bookkeeping for a 429 response. Returns the parsed Retry-After."""
+        retry_after = bucket.parse_retry_after(response)
+        bucket.record_429(retry_after)
+        return retry_after
 
     def default_demo_wallets(self) -> list[str]:
         return [
@@ -31,10 +65,19 @@ class PolymarketClient:
         """Fetch active markets; falls back to curated weather stubs offline."""
         url = f"{self.settings.gamma_host}/markets"
         params = {"active": "true", "closed": "false", "limit": limit}
+        bucket = get_gamma_bucket()
+        await bucket.acquire()
         try:
             async with httpx.AsyncClient(timeout=8.0) as client:
                 resp = await client.get(url, params=params)
-                resp.raise_for_status()
+                if resp.status_code == 429:
+                    retry_after = self._record_429(bucket, resp, self.settings.gamma_host)
+                    await self._notify_rate_limit(self.settings.gamma_host, retry_after)
+                    logger.warning(
+                        "gamma markets throttled (HTTP 429, retry_after=%.1fs)", retry_after
+                    )
+                else:
+                    resp.raise_for_status()
                 markets = resp.json()
                 weather = [
                     m
@@ -46,6 +89,8 @@ class PolymarketClient:
                 ]
                 if weather:
                     return weather
+        except httpx.HTTPStatusError as exc:
+            logger.warning("gamma markets unavailable, using stubs: %s", exc)
         except Exception as exc:
             logger.warning("gamma markets unavailable, using stubs: %s", exc)
         return self._stub_markets()
@@ -61,12 +106,42 @@ class PolymarketClient:
 
         # Prefer data API when reachable; otherwise emit demo signals for paper/dev.
         rejected: list[tuple[str, int]] = []
+        rejected_429: list[str] = []
+        network_unavailable = False
+        bucket = get_data_bucket()
         try:
             async with httpx.AsyncClient(timeout=6.0) as client:
                 events: list[dict[str, Any]] = []
                 for wallet in wallets:
+                    await bucket.acquire()
                     url = f"{self.settings.data_api_host}/activity"
-                    resp = await client.get(url, params={"user": wallet, "limit": 20})
+                    try:
+                        resp = await client.get(url, params={"user": wallet, "limit": 20})
+                    except httpx.RequestError as exc:
+                        # Transport-level failure (DNS, connect refused, TLS,
+                        # timeout): the API didn't reject the wallet, the
+                        # network did. Don't count it as a per-wallet
+                        # rejection so callers keep their demo fallback.
+                        logger.debug(
+                            "activity API unreachable for %s (%s)", wallet, exc
+                        )
+                        network_unavailable = True
+                        continue
+                    if resp.status_code == 429:
+                        retry_after = self._record_429(
+                            bucket, resp, self.settings.data_api_host
+                        )
+                        await self._notify_rate_limit(
+                            self.settings.data_api_host, retry_after
+                        )
+                        rejected.append((wallet, resp.status_code))
+                        rejected_429.append(wallet)
+                        logger.warning(
+                            "activity API rejected wallet %s (HTTP 429, retry_after=%.1fs)",
+                            wallet,
+                            retry_after,
+                        )
+                        continue
                     if resp.status_code != 200:
                         rejected.append((wallet, resp.status_code))
                         logger.warning(
@@ -112,6 +187,9 @@ class PolymarketClient:
         except httpx.HTTPError as exc:
             logger.debug("activity API unreachable (%s); using demo stream", exc)
 
+        if rejected_429 and self._on_rate_limit is not None:
+            # already counted via the observer; keep the silent path for callers
+            pass
         if rejected:
             codes = ", ".join(
                 f"{wallet[:10]}...={status}" for wallet, status in rejected
@@ -142,12 +220,14 @@ class PolymarketClient:
         """
         found: list[tuple[str, str]] = []
         seen: set[str] = set()
+        bucket = get_gamma_bucket()
         try:
             async with httpx.AsyncClient(timeout=6.0) as client:
                 for keyword in self.settings.weather_keywords:
                     # Any single bad response (transport error, non-JSON body,
                     # unexpected shape) only skips its keyword; discovery then
                     # falls through to the windowed scan if nothing was found.
+                    await bucket.acquire()
                     try:
                         resp = await client.get(
                             f"{self.settings.gamma_host}/public-search",
@@ -157,6 +237,18 @@ class PolymarketClient:
                                 "limit_per_type": 10,
                             },
                         )
+                        if resp.status_code == 429:
+                            retry_after = self._record_429(
+                                bucket, resp, self.settings.gamma_host
+                            )
+                            await self._notify_rate_limit(
+                                self.settings.gamma_host, retry_after
+                            )
+                            logger.debug(
+                                "gamma public-search throttled keyword %s (HTTP 429)",
+                                keyword,
+                            )
+                            continue
                         if resp.status_code != 200:
                             logger.debug(
                                 "gamma public-search rejected keyword %s (HTTP %d)",
@@ -225,14 +317,35 @@ class PolymarketClient:
 
         rejected: list[int] = []
         observations: list[dict[str, Any]] = []
+        bucket = get_data_bucket()
         try:
             async with httpx.AsyncClient(timeout=6.0) as client:
                 for condition_id, slug in targets:
+                    await bucket.acquire()
                     url = f"{self.settings.data_api_host}/trades"
-                    resp = await client.get(
-                        url,
-                        params={"market": condition_id, "limit": trades_per_market},
-                    )
+                    try:
+                        resp = await client.get(
+                            url,
+                            params={"market": condition_id, "limit": trades_per_market},
+                        )
+                    except httpx.HTTPError as exc:
+                        logger.debug("trades feed unreachable for %s (%s)", slug, exc)
+                        rejected.append(0)
+                        continue
+                    if resp.status_code == 429:
+                        retry_after = self._record_429(
+                            bucket, resp, self.settings.data_api_host
+                        )
+                        await self._notify_rate_limit(
+                            self.settings.data_api_host, retry_after
+                        )
+                        rejected.append(resp.status_code)
+                        logger.warning(
+                            "trades feed throttled market scan %s (HTTP 429, retry_after=%.1fs)",
+                            slug,
+                            retry_after,
+                        )
+                        continue
                     if resp.status_code != 200:
                         rejected.append(resp.status_code)
                         logger.warning(

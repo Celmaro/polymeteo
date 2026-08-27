@@ -126,7 +126,14 @@ class CopyEngine:
             "live_orders_failed": 0,
             "live_orders_duplicated": 0,
             "live_orders_throttled": 0,
+            "upstream_429_rejections": 0,
+            "signals_by_reason": {},
         }
+
+        # Always route the client's 429 events through the engine so the
+        # ``upstream_429_rejections`` counter ticks regardless of how the
+        # caller constructed the client.
+        self.client._on_rate_limit = self.record_rate_limit
 
     @property
     def mode(self) -> str:
@@ -175,6 +182,7 @@ class CopyEngine:
 
         if not decision.should_copy:
             self.stats["skipped"] += 1
+            self._bump_skip_reason(decision)
         else:
             self.stats["copied"] += 1
             n = self.stats["copied"]
@@ -225,6 +233,56 @@ class CopyEngine:
         decision.should_copy = False
         decision.reason = f"risk_rejected:{reason}"
         self.stats["risk_rejections"] += 1
+
+    def record_rate_limit(self, host: str, retry_after: float) -> None:
+        """Observer invoked by PolymarketClient when an upstream returns 429.
+
+        Keeps the counter monotonic;``signals_by_reason`` already exposes the
+        full skip taxonomy so the dashboard can render ``429`` counts there
+        without an extra dimension.
+        """
+        self.stats["upstream_429_rejections"] += 1
+        self.stats["signals_by_reason"].setdefault("upstream_429", 0)
+        self.stats["signals_by_reason"]["upstream_429"] += 1
+        logger.warning(
+            "upstream 429 on %s retry_after=%.1fs total=%d",
+            host,
+            retry_after,
+            self.stats["upstream_429_rejections"],
+        )
+
+    # Stable bucket keys for the skip-reason histogram. The raw reason strings
+    # carry variable suffixes (e.g. ``stale_signal:850ms``,
+    # ``risk_rejected:max_trade_size_usd``); folding them into known prefixes
+    # keeps the histogram readable and bounded so the dashboard never explodes
+    # into per-fill reason keys.
+    _SKIP_REASON_BUCKETS: dict[str, str] = {
+        "stale_signal": "stale",
+        "stale": "stale",
+        "risk_rejected": "risk_rejected",
+        "clamp_below_min": "clamp_below_min",
+        "order_duplicate": "order_duplicate",
+        "order_rate_limited": "order_rate_limited",
+        "thin_edge": "thin_edge",
+        "size_too_small": "size_too_small",
+        "daily_loss_cap": "daily_loss_cap",
+        "max_exposure_reached": "max_exposure_reached",
+        "daily_loss_limit": "daily_loss_limit",
+        "upstream_429": "upstream_429",
+    }
+
+    def _bump_skip_reason(self, decision: CopyDecision) -> None:
+        """Count a single skip in the signals_by_reason histogram.
+
+        Raw reason strings carry variable suffixes (latency numbers, limit
+        names); the histogram collapses them to a stable prefix so the
+        dashboard sees a bounded set of buckets instead of one key per fill.
+        """
+        reason = decision.reason or "unknown"
+        prefix = reason.split(":", 1)[0]
+        bucket_key = self._SKIP_REASON_BUCKETS.get(prefix, prefix)
+        bucket = self.stats["signals_by_reason"]
+        bucket[bucket_key] = bucket.get(bucket_key, 0) + 1
 
     def _maybe_reset_day(self) -> None:
         """Reset local daily counters alongside the risk engine's own reset."""
@@ -533,7 +591,8 @@ class CopyEngine:
         s = self.stats
         logger.info(
             "STATS detected=%s copied=%s skipped=%s risk_rejected=%s "
-            "quorum_votes=%s reached=%s rejected=%s targets=%s balance=$%.2f",
+            "quorum_votes=%s reached=%s rejected=%s targets=%s balance=$%.2f "
+            "upstream_429=%s",
             s["signals_detected"],
             s["copied"],
             s["skipped"],
@@ -543,6 +602,7 @@ class CopyEngine:
             s["quorum_rejected"],
             len(self._resolve_wallets()),
             self._balance,
+            s["upstream_429_rejections"],
         )
 
     async def run(self, duration_sec: float | None = None) -> None:

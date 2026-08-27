@@ -101,6 +101,27 @@ def _live_engine_status(engine: CopyEngine) -> dict[str, Any]:
     }
 
 
+class _NullNotifier:
+    """No-op notification sink that satisfies the ``send_alert`` protocol.
+
+    ``MonitoringService.set_dependencies`` types its notifier parameter as
+    ``NotificationHandler`` (a forward reference in :mod:`ops.monitoring`). The
+    only contract we need to satisfy is ``await send_alert(title, message,
+    severity)`` — see ``FlakyNotifier`` in ``tests/test_monitoring_service.py``.
+    Keeping this class private to ``app.py`` avoids leaking a sentinel type
+    into the public surface while still letting the background update /
+    alert / hourly-report loops run.
+    """
+
+    async def send_alert(self, title: str, message: str, severity: str = "info") -> bool:
+        logger.debug("[MONITOR] alert suppressed (null notifier): %s", title)
+        return True
+
+    async def send_message(self, text: str, chat_id: int | None = None) -> bool:
+        logger.debug("[MONITOR] message suppressed (null notifier)")
+        return True
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Run the copy-trading engine inside the API process when enabled.
@@ -113,6 +134,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     task: asyncio.Task[None] | None = None
     discovery: WalletDiscovery | None = None
     discovery_task: asyncio.Task[None] | None = None
+    monitor: MonitoringService | None = None
 
     # Discovery starts before the engine so promotions are visible from the
     # very first poll of the merged rotation.
@@ -143,9 +165,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 settings.quorum_window_seconds,
                 settings.quorum_max_acceptable_price,
             )
-        # Unstarted service: only its quorum hit/skip counters are driven by
-        # the engine hooks; none of its background loops run.
+        # Monitoring service: count quorum hits/skips via the engine hooks AND
+        # run the dashboard / alert / hourly-report background loops. The
+        # notifier is the in-process null sink; a real Telegram transport can
+        # replace it once TELEGRAM_BOT_TOKEN is wired through Settings.
         monitor = MonitoringService() if quorum_engine is not None else None
+        if monitor is not None:
+            async def _get_metrics() -> dict[str, Any]:
+                # ``_live_engine_status`` is sync; wrap so the monitoring loop
+                # can ``await`` it without blocking the event loop.
+                return _live_engine_status(engine)
+            monitor.set_dependencies(_NullNotifier(), _get_metrics)
         engine = CopyEngine(
             settings=settings,
             target_provider=provider,
@@ -154,6 +184,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
         app.state.engine = engine
         task = asyncio.create_task(engine.run(), name="copy-engine")
+        if monitor is not None:
+            # ``start()`` schedules update_loop / alert_loop / hourly_report
+            # background tasks and returns immediately. ``stop()`` cancels
+            # them at shutdown below.
+            await monitor.start()
+            logger.info(
+                "MonitoringService started update_interval_s=%s alert_interval_s=%s",
+                monitor.update_interval,
+                monitor.alert_interval,
+            )
         logger.info(
             "CopyEngine loop enabled mode=%s static_targets=%s poll_interval_ms=%s",
             engine.mode,
@@ -163,6 +203,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        if monitor is not None:
+            logger.info("Stopping MonitoringService")
+            try:
+                await asyncio.wait_for(monitor.stop(), timeout=5.0)
+            except asyncio.TimeoutError:
+                logger.warning("MonitoringService did not stop within 5s")
+            except Exception:
+                logger.exception("MonitoringService crashed during shutdown")
         if engine is not None and task is not None:
             logger.info("Stopping CopyEngine loop")
             engine.stop()
