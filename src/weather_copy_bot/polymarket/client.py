@@ -10,6 +10,7 @@ spiral.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -119,91 +120,92 @@ class PolymarketClient:
         if not wallets:
             wallets = self.default_demo_wallets()
 
-        # Prefer data API when reachable; otherwise emit demo signals for paper/dev.
+        bucket = get_data_bucket()
+        network_unavailable = False
+        all_items: list[dict[str, Any]] = []
         rejected: list[tuple[str, int]] = []
         rejected_429: list[str] = []
-        network_unavailable = False
-        bucket = get_data_bucket()
+
+        async def fetch_wallet(wallet: str) -> list[dict[str, Any]]:
+            nonlocal network_unavailable
+            await bucket.acquire()
+            url = f"{self.settings.data_api_host}/activity"
+            try:
+                async with httpx.AsyncClient(timeout=6.0) as client:
+                    resp = await client.get(url, params={"user": wallet, "limit": 20})
+            except httpx.RequestError as exc:
+                logger.debug("activity API unreachable for %s (%s)", wallet, exc)
+                network_unavailable = True
+                return []
+            if resp.status_code == 429:
+                retry_after = self._record_429(bucket, resp, self.settings.data_api_host)
+                await self._notify_rate_limit(self.settings.data_api_host, retry_after)
+                rejected.append((wallet, resp.status_code))
+                rejected_429.append(wallet)
+                logger.warning(
+                    "activity API rejected wallet %s (HTTP 429, retry_after=%.1fs)",
+                    wallet,
+                    retry_after,
+                )
+                return []
+            if resp.status_code != 200:
+                rejected.append((wallet, resp.status_code))
+                logger.warning(
+                    "activity API rejected wallet %s (HTTP %d)",
+                    wallet,
+                    resp.status_code,
+                )
+                return []
+            return resp.json()
+
         try:
-            async with httpx.AsyncClient(timeout=6.0) as client:
-                events: list[dict[str, Any]] = []
-                for wallet in wallets:
-                    await bucket.acquire()
-                    url = f"{self.settings.data_api_host}/activity"
-                    try:
-                        resp = await client.get(url, params={"user": wallet, "limit": 20})
-                    except httpx.RequestError as exc:
-                        # Transport-level failure (DNS, connect refused, TLS,
-                        # timeout): the API didn't reject the wallet, the
-                        # network did. Don't count it as a per-wallet
-                        # rejection so callers keep their demo fallback.
-                        logger.debug(
-                            "activity API unreachable for %s (%s)", wallet, exc
+            results = await asyncio.gather(
+                *[fetch_wallet(w) for w in wallets], return_exceptions=True
+            )
+            for result in results:
+                if isinstance(result, Exception):
+                    logger.debug("wallet fetch raised %s", result)
+                    network_unavailable = True
+                    continue
+                for item in result:
+                    title = str(item.get("title", item.get("slug", "")))
+                    if (
+                        market_filter
+                        and market_filter.lower() not in title.lower()
+                        and not any(
+                            k in title.lower() for k in self.settings.strict_weather_keywords
                         )
-                        network_unavailable = True
+                    ):
                         continue
-                    if resp.status_code == 429:
-                        retry_after = self._record_429(
-                            bucket, resp, self.settings.data_api_host
-                        )
-                        await self._notify_rate_limit(
-                            self.settings.data_api_host, retry_after
-                        )
-                        rejected.append((wallet, resp.status_code))
-                        rejected_429.append(wallet)
-                        logger.warning(
-                            "activity API rejected wallet %s (HTTP 429, retry_after=%.1fs)",
-                            wallet,
-                            retry_after,
-                        )
-                        continue
-                    if resp.status_code != 200:
-                        rejected.append((wallet, resp.status_code))
-                        logger.warning(
-                            "activity API rejected wallet %s (HTTP %d)",
-                            wallet,
-                            resp.status_code,
-                        )
-                        continue
-                    for item in resp.json():
-                        title = str(item.get("title", item.get("slug", "")))
-                        if (
-                            market_filter
-                            and market_filter.lower() not in title.lower()
-                            and not any(
-                                k in title.lower() for k in self.settings.strict_weather_keywords
-                            )
-                        ):
-                            continue
-                        events.append(
-                            {
-                                "id": str(item.get("id", item.get("transactionHash", ""))),
-                                "wallet": wallet,
-                                "timestamp": self._normalize_activity_timestamp(
-                                    item.get("timestamp")
-                                ),
-                                "market_slug": item.get("slug")
-                                or item.get("eventSlug")
-                                or "weather",
-                                "market_title": title,
-                                "city": self._infer_city(title),
-                                "outcome": item.get("outcome", "Yes"),
-                                "side": "BUY"
-                                if str(item.get("side", "BUY")).upper() == "BUY"
-                                else "SELL",
-                                "price": float(item.get("price", 0.5)),
-                                "size_usd": float(item.get("usdcSize", item.get("size", 50))),
-                                "token_id": item.get("asset"),
-                                "demo": False,
-                            }
-                        )
-                if events:
-                    return events
+                    wallet = item.get("wallet", "")
+                    all_items.append(
+                        {
+                            "id": str(item.get("id", item.get("transactionHash", ""))),
+                            "wallet": wallet,
+                            "timestamp": self._normalize_activity_timestamp(
+                                item.get("timestamp")
+                            ),
+                            "market_slug": item.get("slug")
+                            or item.get("eventSlug")
+                            or "weather",
+                            "market_title": title,
+                            "city": self._infer_city(title),
+                            "outcome": item.get("outcome", "Yes"),
+                            "side": "BUY"
+                            if str(item.get("side", "BUY")).upper() == "BUY"
+                            else "SELL",
+                            "price": float(item.get("price", 0.5)),
+                            "size_usd": float(item.get("usdcSize", item.get("size", 50))),
+                            "token_id": item.get("asset"),
+                            "demo": False,
+                        }
+                    )
+            if all_items:
+                return all_items
         except httpx.HTTPError as exc:
             logger.debug("activity API unreachable (%s); using demo stream", exc)
 
         if rejected_429 and self._on_rate_limit is not None:
-            # already counted via the observer; keep the silent path for callers
             pass
         if rejected:
             codes = ", ".join(
@@ -231,76 +233,88 @@ class PolymarketClient:
         rarely contains daily weather markets, so discovery queries
         public-search per weather keyword instead. Falls back silently to an
         empty result on any network trouble, letting callers use the windowed
-        scan.
+        scan. All keywords are fetched in parallel via asyncio.gather.
         """
-        found: list[tuple[str, str]] = []
         seen: set[str] = set()
         bucket = get_gamma_bucket()
-        try:
-            async with httpx.AsyncClient(timeout=6.0) as client:
-                for keyword in self.settings.weather_keywords:
-                    # Any single bad response (transport error, non-JSON body,
-                    # unexpected shape) only skips its keyword; discovery then
-                    # falls through to the windowed scan if nothing was found.
-                    await bucket.acquire()
-                    try:
-                        resp = await client.get(
-                            f"{self.settings.gamma_host}/public-search",
-                            params={
-                                "q": keyword,
-                                "events_status": "active",
-                                "limit_per_type": 10,
-                            },
+
+        async def _search_keyword(keyword: str) -> list[tuple[str, str]]:
+            await bucket.acquire()
+            try:
+                async with httpx.AsyncClient(timeout=6.0) as client:
+                    resp = await client.get(
+                        f"{self.settings.gamma_host}/public-search",
+                        params={
+                            "q": keyword,
+                            "events_status": "active",
+                            "limit_per_type": 10,
+                        },
+                    )
+                    if resp.status_code == 429:
+                        retry_after = self._record_429(
+                            bucket, resp, self.settings.gamma_host
                         )
-                        if resp.status_code == 429:
-                            retry_after = self._record_429(
-                                bucket, resp, self.settings.gamma_host
-                            )
-                            await self._notify_rate_limit(
-                                self.settings.gamma_host, retry_after
-                            )
-                            logger.debug(
-                                "gamma public-search throttled keyword %s (HTTP 429)",
-                                keyword,
-                            )
-                            continue
-                        if resp.status_code != 200:
-                            logger.debug(
-                                "gamma public-search rejected keyword %s (HTTP %d)",
-                                keyword,
-                                resp.status_code,
-                            )
-                            continue
-                        body = resp.json()
-                    except Exception as exc:
+                        await self._notify_rate_limit(
+                            self.settings.gamma_host, retry_after
+                        )
                         logger.debug(
-                            "gamma public-search query %r failed (%s)", keyword, exc
+                            "gamma public-search throttled keyword %s (HTTP 429)",
+                            keyword,
                         )
+                        return []
+                    if resp.status_code != 200:
+                        logger.debug(
+                            "gamma public-search rejected keyword %s (HTTP %d)",
+                            keyword,
+                            resp.status_code,
+                        )
+                        return []
+                    body = resp.json()
+            except Exception as exc:
+                logger.debug(
+                    "gamma public-search query %r failed (%s)", keyword, exc
+                )
+                return []
+            if not isinstance(body, dict):
+                return []
+            results: list[tuple[str, str]] = []
+            events = body.get("events") or []
+            for event in events:
+                if not isinstance(event, dict):
+                    continue
+                for market in event.get("markets") or []:
+                    if not isinstance(market, dict):
                         continue
-                    if not isinstance(body, dict):
+                    condition_id = str(market.get("conditionId") or "").strip()
+                    if (
+                        not condition_id
+                        or condition_id in seen
+                        or not market.get("active")
+                        or market.get("closed")
+                    ):
                         continue
-                    events = body.get("events") or []
-                    for event in events:
-                        if not isinstance(event, dict):
-                            continue
-                        for market in event.get("markets") or []:
-                            if not isinstance(market, dict):
-                                continue
-                            condition_id = str(market.get("conditionId") or "").strip()
-                            if (
-                                not condition_id
-                                or condition_id in seen
-                                or not market.get("active")
-                                or market.get("closed")
-                            ):
-                                continue
-                            seen.add(condition_id)
-                            slug = str(market.get("slug") or event.get("slug") or "weather")
-                            found.append((condition_id, slug))
-                            if len(found) >= max_markets:
-                                return found
+                    seen.add(condition_id)
+                    slug = str(market.get("slug") or event.get("slug") or "weather")
+                    results.append((condition_id, slug))
+            return results
+
+        try:
+            results = await asyncio.gather(
+                *[_search_keyword(kw) for kw in self.settings.weather_keywords],
+                return_exceptions=True,
+            )
         except httpx.HTTPError as exc:
             logger.debug("gamma public-search unreachable (%s)", exc)
+            return []
+        found: list[tuple[str, str]] = []
+        for batch in results:
+            if isinstance(batch, Exception):
+                logger.debug("keyword search raised: %s", batch)
+                continue
+            for item in batch:
+                found.append(item)
+                if len(found) >= max_markets:
+                    return found
         return found
 
     async def discover_weather_wallets(
@@ -428,7 +442,7 @@ class PolymarketClient:
 
     def _next_demo_events(self, wallets: list[str]) -> list[dict[str, Any]]:
         self._demo_cursor += 1
-        if self._demo_cursor % 3 != 0:
+        if self._demo_cursor % 10 != 0:
             return []
 
         cities = ["New York", "London", "Tokyo", "Chicago", "Seattle", "Miami"]

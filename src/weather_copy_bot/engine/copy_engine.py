@@ -33,6 +33,7 @@ from weather_copy_bot.live.wallet_filter import WeatherWalletFilter
 from weather_copy_bot.models import CopyDecision, Side, TradeSignal
 from weather_copy_bot.paper.trader import PaperTrader
 from weather_copy_bot.polymarket.client import PolymarketClient
+from weather_copy_bot.polymarket.ws_client import CLOBWebSocket, TradeUpdate
 
 if TYPE_CHECKING:
     from weather_copy_bot.ops.monitoring import MonitoringService
@@ -46,6 +47,7 @@ SignalHandler = Callable[[TradeSignal, CopyDecision], Awaitable[None]]
 SEEN_TTL_SECONDS = 3600.0
 SEEN_MAX_ENTRIES = 10_000
 SEEN_FILE_NAME = "copy_seen.json"
+SEEN_SAVE_INTERVAL_S = 60.0
 
 # Poll-failure backoff: a hard-down upstream must not flood logs at the poll
 # interval (250ms by default), so consecutive failures grow the sleep up to a cap.
@@ -114,9 +116,12 @@ class CopyEngine:
         self._seen: set[str] = set()
         self._seen_ts: dict[str, float] = {}
         self._seen_loaded = False
+        self._last_seen_save: float = 0.0
 
         self._running = False
         self._started_at: float | None = None
+        self._ws: CLOBWebSocket | None = None
+        self._ws_subscriptions: set[str] = set()
         self.stats = {
             "signals_detected": 0,
             "copied": 0,
@@ -312,6 +317,39 @@ class CopyEngine:
             self._latency_samples = self._latency_samples[-self._HIST_MAX_SAMPLES:]
         if len(self._upstream_age_samples) > self._HIST_MAX_SAMPLES:
             self._upstream_age_samples = self._upstream_age_samples[-self._HIST_MAX_SAMPLES:]
+
+    async def _on_ws_trade(self, trade: TradeUpdate) -> None:
+        key = f"ws:{trade.trade_id}"
+        if key in self._seen:
+            return
+        now_ts = time.time()
+        self._remember(key, now_ts)
+        self._record_latency_sample(0, 0)
+        signal = TradeSignal(
+            signal_id=str(uuid.uuid4()),
+            target_wallet=trade.filler or "clob-stream",
+            market_slug=trade.market_slug,
+            market_title=trade.market_slug,
+            city="Unknown",
+            outcome="Unknown",
+            side=trade.side,
+            price=trade.price,
+            size_usd=0.0,
+            detected_at=datetime.now(timezone.utc),
+            target_filled_at=trade.timestamp,
+            latency_ms=0,
+            upstream_age_ms=0,
+            token_id=None,
+        )
+        await self._route_signal({"source": "ws", "trade_id": trade.trade_id}, signal)
+
+    async def _subscribe_ws_markets(self, market_slugs: list[str]) -> None:
+        if self._ws is None:
+            return
+        for slug in market_slugs:
+            if slug not in self._ws_subscriptions:
+                await self._ws.subscribe(slug)
+                self._ws_subscriptions.add(slug)
 
     @staticmethod
     def _percentile(samples: list[int], p: float) -> int | None:
@@ -591,7 +629,9 @@ class CopyEngine:
                 cycle_skip_stale,
                 cycle_skip_other,
             )
-        self._save_seen()
+        if now_ts - self._last_seen_save >= SEEN_SAVE_INTERVAL_S:
+            self._save_seen()
+            self._last_seen_save = now_ts
         elapsed_ms = (time.perf_counter() - started) * 1000
         logger.debug("poll_once processed=%s elapsed_ms=%.1f", len(fresh), elapsed_ms)
         return fresh
@@ -867,6 +907,27 @@ class CopyEngine:
                     self.quorum.min_quorum_count,
                 )
                 self.quorum.min_quorum_count = 1
+
+        self._ws = CLOBWebSocket(on_trade=self._on_ws_trade)
+        try:
+            await self._ws.connect()
+            logger.info("CLOB WebSocket connected")
+        except Exception as exc:
+            logger.warning("CLOB WebSocket connect failed (continuing with polling only): %s", exc)
+            self._ws = None
+
+        if self._ws is not None:
+            asyncio.create_task(self._ws.run())
+            try:
+                markets = await self.client.fetch_weather_markets()
+                slugs = [m.get("slug") or m.get("condition_id", "") for m in markets]
+                slugs = [s for s in slugs if s]
+                if slugs:
+                    await self._subscribe_ws_markets(slugs)
+                    logger.info("WS subscribed to %s weather markets", len(slugs))
+            except Exception as exc:
+                logger.warning("Failed to fetch weather markets for WS subscription: %s", exc)
+
         started = time.time()
         last_stats_log = started
         interval = self.settings.poll_interval_ms / 1000.0
@@ -898,6 +959,8 @@ class CopyEngine:
                 await self.quorum.stop_cleanup_task()
             if started_queue:
                 await self.order_queue.stop()
+            if self._ws is not None:
+                await self._ws.disconnect()
             self._running = False
 
     def stop(self) -> None:
