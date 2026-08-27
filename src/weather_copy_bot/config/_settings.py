@@ -39,7 +39,7 @@ class Settings(BaseSettings):
     max_copy_latency_ms: int = 800
     dry_run: bool = True
 
-    poll_interval_ms: int = 250
+    poll_interval_ms: int = 100
     market_filter: str = "weather"
     paper_starting_balance: float = 10_000.0
 
@@ -118,6 +118,10 @@ class Settings(BaseSettings):
     )
 
     database_url: str = Field(default="sqlite:///./polymeteo.db")
+
+    sentry_dsn: str = ""
+    sentry_environment: str = "production"
+    sentry_traces_sample_rate: float = 1.0
 
     @field_validator("target_wallets", mode="before")
     @classmethod

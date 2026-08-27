@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from functools import lru_cache
 from typing import Any
 
+import sentry_sdk
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -31,6 +32,7 @@ from weather_copy_bot.engine import (
     WalletDiscovery,
 )
 from weather_copy_bot.ops.monitoring import MonitoringService
+from weather_copy_bot.ops.metrics_server import register_metrics_routes
 
 logging.basicConfig(
     level=logging.INFO,
@@ -131,6 +133,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     that default so no test ever talks to Polymarket.
     """
     settings = get_settings()
+
+    if settings.sentry_dsn:
+        sentry_sdk.init(
+            dsn=settings.sentry_dsn,
+            environment=settings.sentry_environment,
+            traces_sample_rate=settings.sentry_traces_sample_rate,
+        )
+        logger.info("Sentry initialized (env=%s)", settings.sentry_environment)
+    else:
+        logger.info("Sentry DSN not set — error tracking disabled")
+
     engine: CopyEngine | None = None
     task: asyncio.Task[None] | None = None
     discovery: WalletDiscovery | None = None
@@ -301,6 +314,7 @@ def create_app() -> FastAPI:
     )
 
     _register_api_routes(app)
+    register_metrics_routes(app)
 
     dashboard_dist = os.path.join(os.environ.get("APP_ROOT", "/app"), "dashboard", "dist")
     if os.path.isdir(dashboard_dist):
