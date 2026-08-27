@@ -95,8 +95,30 @@ def _live_engine_status(engine: CopyEngine) -> dict[str, Any]:
         "health": "healthy" if healthy else "starting",
         "running": running,
         "dry_run": engine.settings.dry_run,
+        "live_trading_enabled": engine.settings.live_trading_enabled,
         "quorum_enabled": engine.quorum is not None,
         "source": "live",
+        # Operators need to confirm at a glance that the live settings match
+        # what they deployed. Without this, a deploy with the wrong env vars
+        # looks identical to a healthy deploy until the first signal.
+        "config": {
+            "copy_ratio": engine.settings.copy_ratio,
+            "max_position_usd": engine.settings.max_position_usd,
+            "max_daily_loss_usd": engine.settings.max_daily_loss_usd,
+            "min_edge_bps": engine.settings.min_edge_bps,
+            "min_trade_size_usd": getattr(engine.policy, "min_trade_size_usd", 5.0),
+            "wallet_discovery_enabled": engine.settings.wallet_discovery_enabled,
+            "discovery_interval_s": engine.settings.discovery_interval_s,
+            "discovery_min_trades": engine.settings.min_candidate_trades,
+            "discovery_min_volume": engine.settings.min_candidate_volume_usd,
+            "discovery_max_markets": engine.settings.discovery_max_markets,
+            "quorum_min_count": engine.settings.quorum_min_count,
+            "quorum_window_seconds": engine.settings.quorum_window_seconds,
+            "quorum_max_acceptable_price": engine.settings.quorum_max_acceptable_price,
+            "consensus_min_size_usd": engine.settings.consensus_min_size_usd,
+            "wallet_filter_enabled": engine.settings.wallet_filter_enabled,
+            "order_queue_enabled": engine.settings.order_queue_enabled,
+        },
         "stats": stats,
     }
 

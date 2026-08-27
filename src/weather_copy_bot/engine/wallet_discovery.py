@@ -28,10 +28,44 @@ logger = logging.getLogger(__name__)
 # slower than the trading poll loop (whose cap is 5s).
 DISCOVERY_FAILURE_BACKOFF_CAP_S = 300.0
 
+# How many addresses to surface in the ``promoted`` log line. The full list
+# can be 90+ wallets after a successful cycle; dumping every address makes a
+# 4-5 KB log line that is hostile to operators scrolling the dashboard.
+_PROMOTED_LOG_SAMPLE = 3
+
 
 def _backoff_delay(failures: int, base_interval_s: float, cap_s: float) -> float:
     doubled = base_interval_s * (2 ** min(max(failures - 1, 0), 4))
     return min(doubled, cap_s)
+
+
+def _short_addr(addr: str) -> str:
+    """Render ``addr`` as ``0x6a8b…7542`` for compact log output.
+
+    Falls back to the raw string when the address is too short to truncate
+    meaningfully (test/demo wallets).
+    """
+    if len(addr) <= 12:
+        return addr
+    return f"{addr[:6]}…{addr[-4:]}"
+
+
+def _format_promoted_sample(promoted: Sequence[str]) -> str:
+    """Return a compact ``0x…, 0x…, …`` representation of ``promoted``.
+
+    Always shows the first ``_PROMOTED_LOG_SAMPLE`` and the last
+    ``_PROMOTED_LOG_SAMPLE`` when the list is long enough, with an ellipsis
+    between the two groups. Operators get the count separately so the sample
+    is purely for cross-referencing known wallets.
+    """
+    n = len(promoted)
+    if n == 0:
+        return ""
+    if n <= _PROMOTED_LOG_SAMPLE * 2:
+        return ", ".join(_short_addr(a) for a in promoted)
+    head = list(promoted[:_PROMOTED_LOG_SAMPLE])
+    tail = list(promoted[-_PROMOTED_LOG_SAMPLE:])
+    return f"{', '.join(_short_addr(a) for a in head)}, …, {', '.join(_short_addr(a) for a in tail)}"
 
 
 class MergedTargetProvider:
@@ -94,11 +128,12 @@ class WalletDiscovery:
         self._last_promoted: tuple[str, ...] = ()
         self._running = False
         self.stats: dict[str, Any] = {
-            "cycles": 0,
+            "discovery_cycles": 0,
             "observations": 0,
             "last_cycle_at": None,
             "consecutive_failures": 0,
             "last_error": None,
+            "discovery_last_error_at": None,
         }
 
     def observe(self, events: Iterable[dict[str, Any]]) -> int:
@@ -193,13 +228,18 @@ class WalletDiscovery:
                 consecutive_failures = 0
                 self.stats["consecutive_failures"] = 0
                 self.stats["last_error"] = None
-                self.stats["cycles"] += 1
+                self.stats["discovery_last_error_at"] = None
+                self.stats["discovery_cycles"] += 1
                 self.stats["last_cycle_at"] = datetime.now(timezone.utc).isoformat()
                 promoted = tuple(self.promoted_wallets())
                 if promoted != self._last_promoted:
                     self._last_promoted = promoted
                     if promoted:
-                        logger.info("discovery promoted targets: %s", ", ".join(promoted))
+                        logger.info(
+                            "discovery promoted targets N=%d (sample: %s)",
+                            len(promoted),
+                            _format_promoted_sample(promoted),
+                        )
                     else:
                         logger.info("discovery promotion list now empty")
                 logger.debug(
@@ -211,6 +251,7 @@ class WalletDiscovery:
                 consecutive_failures += 1
                 self.stats["consecutive_failures"] = consecutive_failures
                 self.stats["last_error"] = f"{type(exc).__name__}: {exc}"[:200]
+                self.stats["discovery_last_error_at"] = datetime.now(timezone.utc).isoformat()
                 delay = _backoff_delay(
                     consecutive_failures, interval, DISCOVERY_FAILURE_BACKOFF_CAP_S
                 )

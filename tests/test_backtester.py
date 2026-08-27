@@ -55,6 +55,40 @@ class TestCopyBacktester:
         assert decision.should_copy is False
         assert "size" in decision.reason
 
+    def test_decide_consensus_size_too_small(self):
+        """Consensus path: 2x$5 agreement yields $2.50 after copy_ratio.
+
+        The default $5.00 per-trade floor rejects it; the consensus knob
+        (Settings.consensus_min_size_usd = 2.5) must allow it through.
+        """
+        backtester = CopyBacktester()
+
+        signal = TradeSignal(
+            signal_id="sig-consensus",
+            target_wallet="consensus",
+            market_slug="weather-nyc",
+            market_title="Temperature above 90F in NYC?",
+            city="NYC",
+            outcome="Yes",
+            side=Side.BUY,
+            price=0.60,
+            size_usd=10.0,  # 2 wallets x $5 consensus total
+            detected_at=datetime.now(timezone.utc),
+            target_filled_at=datetime.now(timezone.utc),
+            latency_ms=100,
+        )
+
+        default_decision = backtester.decide(signal, skip_edge_check=True)
+        assert default_decision.should_copy is False
+        assert default_decision.reason == "size_too_small"
+
+        consensus_decision = backtester.decide(
+            signal, skip_edge_check=True, min_size_usd=2.5
+        )
+        assert consensus_decision.should_copy is True
+        assert consensus_decision.reason == "copy"
+        assert consensus_decision.copy_size_usd == 2.5
+
     def test_decide_valid_signal(self):
         """Test valid signal is accepted."""
         backtester = CopyBacktester()

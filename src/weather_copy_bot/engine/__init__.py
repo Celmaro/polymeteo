@@ -35,11 +35,6 @@ from weather_copy_bot.engine.wallet_discovery import (
     MergedTargetProvider,
     WalletDiscovery,
 )
-from weather_copy_bot.engine.wallet_filter import (
-    WalletMetadata,
-    WeatherTagFilter,
-    WeatherWalletFilter,
-)
 
 __all__ = [
     "BacktestConfig",
@@ -65,9 +60,6 @@ __all__ = [
     "TWAPSlicer",
     "TWAPSlicerDepthAware",
     "WalletDiscovery",
-    "WalletMetadata",
     "WalletTradeSignal",
-    "WeatherTagFilter",
-    "WeatherWalletFilter",
     "create_depth_aware_twap",
 ]

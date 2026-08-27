@@ -25,10 +25,11 @@ from typing import TYPE_CHECKING
 
 from weather_copy_bot.backtest.engine import CopyBacktester
 from weather_copy_bot.config import Settings, get_settings
-from weather_copy_bot.engine.order_queue import OrderQueue
+from weather_copy_bot.engine.order_queue import Order, OrderQueue
 from weather_copy_bot.engine.quorum import QuorumEngine, QuorumResult, WalletTradeSignal
 from weather_copy_bot.engine.wallet_discovery import MergedTargetProvider
 from weather_copy_bot.live.risk_engine import Position, RiskEngine
+from weather_copy_bot.live.wallet_filter import WeatherWalletFilter
 from weather_copy_bot.models import CopyDecision, Side, TradeSignal
 from weather_copy_bot.paper.trader import PaperTrader
 from weather_copy_bot.polymarket.client import PolymarketClient
@@ -93,6 +94,10 @@ class CopyEngine:
         # quorum hit/skip hooks; both are duck-typed to keep tests light.
         self.quorum = quorum
         self.monitor = monitor
+        # Optional weather-keyword gate applied before copy AND before the
+        # quorum vote so a non-weather fill can neither trade nor influence
+        # consensus. Only consulted when settings.wallet_filter_enabled.
+        self.wallet_filter = WeatherWalletFilter()
         # Market context per consensus key so the consensus signal minted when
         # wallet B completes the quorum still carries market A's metadata.
         self._quorum_meta: dict[str, dict[str, str]] = {}
@@ -122,10 +127,18 @@ class CopyEngine:
             "quorum_votes": 0,
             "quorum_reached": 0,
             "quorum_rejected": 0,
+            # NOTE: ``live_orders_*`` counters are only meaningful when
+            # ``settings.live_trading_enabled`` is True (i.e. dry_run=False AND
+            # a private key is configured). In paper mode the submission path
+            # is skipped entirely, so these will read 0/0/0/0 even on a busy
+            # session. Always cross-check with ``stats["dry_run"]`` or the
+            # ``live_trading_enabled`` field in /api/engine/status before
+            # interpreting a "0" as "nothing went wrong".
             "live_orders_filled": 0,
             "live_orders_failed": 0,
             "live_orders_duplicated": 0,
             "live_orders_throttled": 0,
+            "dry_run": True,
             "upstream_429_rejections": 0,
             "signals_by_reason": {},
         }
@@ -142,11 +155,11 @@ class CopyEngine:
         return "paper"
 
     async def process_signal(
-        self, signal: TradeSignal, *, skip_edge_check: bool = False
+        self, signal: TradeSignal, *, skip_edge_check: bool = False, min_size_usd: float | None = None
     ) -> CopyDecision:
         self.stats["signals_detected"] += 1
 
-        decision = self.policy.decide(signal, skip_edge_check=skip_edge_check)
+        decision = self.policy.decide(signal, skip_edge_check=skip_edge_check, min_size_usd=min_size_usd)
         self._apply_risk_gate(decision)
 
         if decision.should_copy:
@@ -357,6 +370,12 @@ class CopyEngine:
             )
             return {"status": "duplicate"}
 
+        if self.settings.order_queue_enabled:
+            # Background processor (started via self.order_queue.start) owns
+            # submit + place_order + state transitions. We just acknowledge the
+            # enqueue so the exposure is counted while the copy is in flight.
+            return {"status": "queued"}
+
         if not await self.order_queue.submit(order_id):
             await self.order_queue.mark_cancelled(order_id, "rate_limited")
             self.stats["live_orders_throttled"] += 1
@@ -380,6 +399,33 @@ class CopyEngine:
         await self.order_queue.mark_filled(order_id)
         self.stats["live_orders_filled"] += 1
         return result if isinstance(result, dict) else {"status": "filled"}
+
+    async def _execute_queued_order(self, order: Order) -> bool:
+        """Place one order pulled off the queue (OrderQueue.start executor)."""
+        try:
+            result = await self.client.place_order(
+                token_id=order.token_id,
+                side=order.side,
+                price=order.price,
+                size_usd=order.size_usd,
+            )
+        except Exception as exc:
+            self.stats["live_orders_failed"] += 1
+            await self.order_queue.mark_failed(order.order_id, str(exc))
+            logger.exception(
+                "LIVE COPY FAILED %s %s: %s", order.side, order.token_id, exc
+            )
+            return False
+        await self.order_queue.mark_filled(order.order_id)
+        self.stats["live_orders_filled"] += 1
+        logger.info(
+            "LIVE COPY FILLED %s %s $%.2f @ %.3f",
+            order.side,
+            order.token_id,
+            order.size_usd,
+            order.price,
+        )
+        return True
 
     def _resolve_wallets(self) -> list[str]:
         """Static TARGET_WALLETS merged with promoted discoveries, or demo fallback."""
@@ -447,6 +493,8 @@ class CopyEngine:
         Every fresh fill is copied (or skipped) exactly as before. When a
         quorum engine is attached, the same fill also registers as one vote;
         N distinct wallets on the same token/side fire consensus once.
+        When settings.wallet_filter_enabled, a non-weather signal is gated out
+        up front so it is neither copied nor counted as a quorum vote.
         """
         logger.info(
             "SIGNAL %s %s $%.2f @ %.3f wallet=%s latency=%sms",
@@ -457,6 +505,16 @@ class CopyEngine:
             signal.target_wallet,
             signal.latency_ms,
         )
+        if self.settings.wallet_filter_enabled:
+            allowed, reason = self.wallet_filter.should_copy(signal)
+            if not allowed:
+                logger.info(
+                    "FILTER %s %s (reason=%s)",
+                    signal.side.value,
+                    signal.market_slug,
+                    reason,
+                )
+                return
         decision = await self.process_signal(signal)
         if decision.should_copy:
             logger.info(
@@ -519,24 +577,32 @@ class CopyEngine:
             latency_ms=0,
             token_id=result.token_id,
         )
-        logger.info(
-            "QUORUM %s %s wallets=%s vwap=%.3f size=$%.2f",
-            result.side,
-            result.token_id[:16],
-            result.quorum_size,
-            result.vwap_price,
-            result.total_size_usd,
+        decision = await self.process_signal(
+            consensus_signal,
+            skip_edge_check=True,
+            min_size_usd=self.settings.consensus_min_size_usd,
         )
-        decision = await self.process_signal(consensus_signal, skip_edge_check=True)
         if decision.should_copy:
             logger.info(
-                "QUORUM COPY %s $%.2f @ %.3f",
+                "QUORUM %s %s wallets=%s vwap=%.3f size=$%.2f -> COPY $%.2f @ %.3f",
                 result.side,
+                result.token_id[:16],
+                result.quorum_size,
+                result.vwap_price,
+                result.total_size_usd,
                 decision.copy_size_usd,
                 result.vwap_price,
             )
         else:
-            logger.info("QUORUM SKIP %s (%s)", result.side, decision.reason)
+            logger.info(
+                "QUORUM %s %s wallets=%s vwap=%.3f size=$%.2f -> SKIP (%s)",
+                result.side,
+                result.token_id[:16],
+                result.quorum_size,
+                result.vwap_price,
+                result.total_size_usd,
+                decision.reason,
+            )
         if not decision.should_copy and self.monitor is not None:
             self.monitor.record_quorum_skip(decision.reason)
 
@@ -589,10 +655,21 @@ class CopyEngine:
     def _log_stats_snapshot(self) -> None:
         """One-line periodic summary so quiet stretches stay observable."""
         s = self.stats
+        # ``dry_run`` is a runtime flag operators flip from the dashboard; mirror
+        # the live value into the snapshot so the STATS heartbeat itself tells
+        # operators whether ``live_orders_*`` zeros are expected (paper mode) or
+        # worth investigating (live mode).
+        s["dry_run"] = bool(self.settings.dry_run)
+        # Collapse the signals_by_reason histogram into a compact ``a=1,b=2``
+        # suffix so a single STATS line still tells the operator why signals
+        # were skipped (stale / size / edge / risk / dedup / upstream_429).
+        reasons = ",".join(f"{k}={v}" for k, v in sorted(s["signals_by_reason"].items()))
         logger.info(
-            "STATS detected=%s copied=%s skipped=%s risk_rejected=%s "
-            "quorum_votes=%s reached=%s rejected=%s targets=%s balance=$%.2f "
-            "upstream_429=%s",
+            "STATS mode=%s detected=%s copied=%s skipped=%s risk_rejected=%s "
+            "quorum_votes=%s reached=%s rejected=%s live_filled=%s live_failed=%s "
+            "live_dup=%s live_throttled=%s targets=%s balance=$%.2f upstream_429=%s "
+            "reasons={%s}",
+            "paper" if s["dry_run"] else "live",
             s["signals_detected"],
             s["copied"],
             s["skipped"],
@@ -600,9 +677,14 @@ class CopyEngine:
             s["quorum_votes"],
             s["quorum_reached"],
             s["quorum_rejected"],
+            s["live_orders_filled"],
+            s["live_orders_failed"],
+            s["live_orders_duplicated"],
+            s["live_orders_throttled"],
             len(self._resolve_wallets()),
             self._balance,
             s["upstream_429_rejections"],
+            reasons,
         )
 
     async def run(self, duration_sec: float | None = None) -> None:
@@ -610,6 +692,12 @@ class CopyEngine:
         self._started_at = time.time()
         if self.quorum is not None:
             self.quorum.start_cleanup_task()
+        started_queue = False
+        if self.settings.order_queue_enabled:
+            # Without this the OrderQueue's dedup + rate-limit + stale-cleanup
+            # loops never run: orders would be enqueued but never executed.
+            await self.order_queue.start(self._execute_queued_order)
+            started_queue = True
         wallets = self._resolve_wallets()
         logger.info(
             "CopyEngine starting mode=%s targets=%s static=%s discovered=%s max_latency=%sms",
@@ -648,6 +736,8 @@ class CopyEngine:
         finally:
             if self.quorum is not None:
                 await self.quorum.stop_cleanup_task()
+            if started_queue:
+                await self.order_queue.stop()
             self._running = False
 
     def stop(self) -> None:

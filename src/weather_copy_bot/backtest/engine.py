@@ -109,11 +109,20 @@ class CopyBacktester:
             max_copy_latency_ms=self.settings.max_copy_latency_ms,
         )
 
-    def decide(self, signal: TradeSignal, *, skip_edge_check: bool = False) -> CopyDecision:
+    def decide(
+        self,
+        signal: TradeSignal,
+        *,
+        skip_edge_check: bool = False,
+        min_size_usd: float | None = None,
+    ) -> CopyDecision:
         """Make a copy decision for a signal.
 
         skip_edge_check bypasses ONLY the thin-edge heuristic; consensus
         agreement substitutes for it, while staleness and size checks apply.
+        min_size_usd overrides the default $5.00 per-trade floor; the consensus
+        path passes Settings.consensus_min_size_usd so a 2-wallet x $5
+        agreement (combined $2.50 after copy_ratio) is not auto-rejected.
         """
         p = self.params
 
@@ -130,7 +139,8 @@ class CopyBacktester:
             signal.size_usd * p.copy_ratio,
             p.max_position_usd,
         )
-        if size < 5:
+        floor = 5.0 if min_size_usd is None else min_size_usd
+        if size < floor:
             return CopyDecision(signal=signal, should_copy=False, reason="size_too_small")
 
         # Edge calculation

@@ -372,7 +372,7 @@ class TestWalletDiscoveryRun:
         settings = _discovery_settings(discovery_interval_s=0.01)
         disc = WalletDiscovery(settings=settings, client=StubDiscoveryClient(settings))
         await disc.run(duration_sec=0)
-        assert disc.stats["cycles"] == 1
+        assert disc.stats["discovery_cycles"] == 1
         assert disc.promoted_wallets() == ["0xloop"]
 
     async def test_run_survives_persistent_failures_and_reports_stats(self):
@@ -386,8 +386,9 @@ class TestWalletDiscoveryRun:
         disc = WalletDiscovery(settings=settings, client=ExplodingClient(settings))
         await disc.run(duration_sec=0.05)
         assert disc._running is False
-        assert disc.stats["cycles"] == 0
+        assert disc.stats["discovery_cycles"] == 0
         assert disc.stats["consecutive_failures"] >= 1
         assert disc.stats["last_error"] is not None
+        assert disc.stats["discovery_last_error_at"] is not None
         assert "RuntimeError" in disc.stats["last_error"]
         assert "unavailable" in disc.stats["last_error"]

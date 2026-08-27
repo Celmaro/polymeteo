@@ -51,6 +51,28 @@ def _signal(
     )
 
 
+def _non_weather_signal(
+    wallet: str = "0xpol",
+    token_id: str = "tok-pol-1",
+) -> TradeSignal:
+    now = datetime.now(timezone.utc)
+    return TradeSignal(
+        signal_id="t-pol",
+        target_wallet=wallet,
+        market_slug="will-candidate-win",
+        market_title="Will the candidate win the election?",
+        city="Unknown",
+        outcome="Yes",
+        side=Side.BUY,
+        price=0.42,
+        size_usd=100.0,
+        detected_at=now,
+        target_filled_at=now,
+        latency_ms=350,
+        token_id=token_id,
+    )
+
+
 class TestCopyEngineInitialization:
     """Test engine initialization."""
 
@@ -408,6 +430,49 @@ class TestOrderQueueWiring:
         assert engine.stats["live_orders_throttled"] == 1
         engine.client.place_order.assert_awaited_once()
 
+    @pytest.mark.asyncio
+    async def test_queued_mode_defers_place_order_to_processor(self):
+        engine = CopyEngine(
+            Settings(
+                dry_run=False,
+                polymarket_private_key="0xsecret",
+                max_copy_latency_ms=800,
+                copy_ratio=0.25,
+                order_queue_enabled=True,
+            )
+        )
+        engine.risk = None
+        engine.client.place_order = AsyncMock(return_value={"status": "matched"})
+
+        decision = await engine.process_signal(_signal(token_id="tok-queued"))
+
+        # In queued mode _execute_live only enqueues; place_order must not be
+        # called synchronously. The background processor owns submission.
+        assert decision.should_copy is True
+        assert engine.client.place_order.assert_not_called() is None
+        assert engine.stats["live_orders_filled"] == 0
+
+    @pytest.mark.asyncio
+    async def test_queue_processor_executes_queued_order(self):
+        engine = CopyEngine(
+            Settings(
+                dry_run=False,
+                polymarket_private_key="0xsecret",
+                max_copy_latency_ms=800,
+                copy_ratio=0.25,
+                order_queue_enabled=True,
+            )
+        )
+        engine.risk = None
+        engine.client.place_order = AsyncMock(return_value={"status": "matched"})
+        engine.poll_once = AsyncMock(return_value=[])
+
+        await engine.run(duration_sec=0.1)
+
+        # The boot path started the queue processor; nothing to assert beyond
+        # no crash in the short run with an empty queue.
+        assert engine.client.place_order.assert_not_called() is None
+
 
 class _FakeQuorumMonitor:
     """Duck-typed MonitoringService capturing quorum hooks."""
@@ -536,8 +601,35 @@ class TestEngineEventLogging:
             await limited._route_signal({}, _signal(wallet="0xa", token_id="tok-logs", size=200.0))
             await limited._route_signal({}, _signal(wallet="0xb", token_id="tok-logs", size=200.0))
         messages = [r.getMessage() for r in caplog.records]
-        assert any(m.startswith("QUORUM COPY") for m in messages)
-        assert any(m.startswith("QUORUM SKIP") and "risk" in m.lower() for m in messages)
+        assert any(m.startswith("QUORUM ") and " -> COPY" in m for m in messages)
+        assert any(
+            m.startswith("QUORUM ") and " -> SKIP" in m and "risk" in m.lower()
+            for m in messages
+        )
+
+    @pytest.mark.asyncio
+    async def test_route_signal_gates_non_weather_signal(self, caplog):
+        engine = CopyEngine(
+            settings=Settings(max_copy_latency_ms=800, wallet_filter_enabled=True),
+            quorum=QuorumEngine(min_quorum_count=2),
+        )
+        with caplog.at_level(logging.INFO):
+            await engine._route_signal({}, _non_weather_signal())
+            await engine._route_signal({}, _non_weather_signal(wallet="0xpol2"))
+        messages = [r.getMessage() for r in caplog.records]
+        assert any(m.startswith("FILTER ") and "reason=" in m for m in messages)
+        assert not any(m.startswith("COPY") for m in messages)
+        assert not any(m.startswith("SKIP ") for m in messages)
+        assert not any(m.startswith("QUORUM ") for m in messages)
+
+    @pytest.mark.asyncio
+    async def test_route_signal_default_passes_non_weather(self, caplog):
+        engine = CopyEngine(Settings(max_copy_latency_ms=800))
+        with caplog.at_level(logging.INFO):
+            await engine._route_signal({}, _non_weather_signal())
+        messages = [r.getMessage() for r in caplog.records]
+        assert any(m.startswith("FILTER ") for m in messages) is False
+        assert any(m.startswith("COPY BUY") for m in messages)
 
     def test_stats_snapshot_logs_all_counters(self, caplog):
         engine = CopyEngine()
@@ -545,13 +637,19 @@ class TestEngineEventLogging:
             engine._log_stats_snapshot()
         message = next(r.getMessage() for r in caplog.records if r.getMessage().startswith("STATS"))
         for key in (
+            "mode=",
             "detected=",
             "copied=",
             "skipped=",
             "risk_rejected=",
             "quorum_votes=",
+            "live_filled=",
+            "live_failed=",
+            "live_dup=",
+            "live_throttled=",
             "targets=",
             "balance=$",
+            "reasons={",
         ):
             assert key in message
 

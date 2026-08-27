@@ -64,6 +64,25 @@ class Settings(BaseSettings):
     quorum_min_count: int = 2
     quorum_window_seconds: int = 600
     quorum_max_acceptable_price: float = 0.85
+    # Consensus aggregates several small per-wallet fills into one combined
+    # copy; the per-trade floor (5.0 in CopyBacktester) would otherwise reject
+    # a 2-wallet x $5 agreement at 2 x 5 x 0.25 = $2.50. This knob lowers the
+    # floor specifically for the consensus path (agreement substitutes for
+    # conviction). Leave at 5.0 to keep the floor identical to single-wallet.
+    consensus_min_size_usd: float = 2.5
+
+    # Weather keyword gate applied in CopyEngine._route_signal before the
+    # quorum layer. Defaults to False so behavior stays identical to prior
+    # releases; production opts in explicitly via WALLET_FILTER_ENABLED=true.
+    wallet_filter_enabled: bool = False
+
+    # Wire OrderQueue.start() into the engine boot path so the queue's
+    # background processor (dedup + rate limiting + order state machine +
+    # stale-order cleanup) actually runs. When enabled, _execute_live only
+    # enqueues and the processor submits and places the order. Defaults to
+    # False so behavior stays identical to prior releases; production opts in
+    # explicitly via ORDER_QUEUE_ENABLED=true.
+    order_queue_enabled: bool = False
 
     api_host: str = "0.0.0.0"
     api_port: int = 8000
