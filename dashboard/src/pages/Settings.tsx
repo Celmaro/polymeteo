@@ -26,7 +26,6 @@ export default function Settings() {
     signalConfidence: 0.7,
     notifications: true,
     emailAlerts: true,
-    telegramAlerts: false,
   });
 
   return (
@@ -125,26 +124,6 @@ export default function Settings() {
                         <div
                           className={`h-4 w-4 rounded-full bg-white transition-transform ${
                             settings.emailAlerts ? "translate-x-6" : "translate-x-1"
-                          }`}
-                        />
-                      </button>
-                    </div>
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <p className="font-medium text-text">Telegram Alerts</p>
-                        <p className="text-xs text-muted">Send alerts via Telegram</p>
-                      </div>
-                      <button
-                        onClick={() =>
-                          setSettings((s) => ({ ...s, telegramAlerts: !s.telegramAlerts }))
-                        }
-                        className={`h-6 w-11 rounded-full transition-colors ${
-                          settings.telegramAlerts ? "bg-cyan" : "bg-line"
-                        }`}
-                      >
-                        <div
-                          className={`h-4 w-4 rounded-full bg-white transition-transform ${
-                            settings.telegramAlerts ? "translate-x-6" : "translate-x-1"
                           }`}
                         />
                       </button>
