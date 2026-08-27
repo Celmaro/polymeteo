@@ -26,6 +26,21 @@ from weather_copy_bot.polymarket.rate_limiter import (
 
 logger = logging.getLogger(__name__)
 
+_WEATHER_TYPES: list[tuple[str, str]] = [
+    ("highest-temperature", "Highest temperature in {}?"),
+    ("will-it-rain", "Will it rain in {}?"),
+    ("hurricane-category", "Hurricane {} on date?"),
+    ("daily-snowfall", "Daily snowfall in {}?"),
+    ("severe-thunderstorm", "Severe thunderstorm in {}?"),
+    ("tornado-risk", "Tornado risk in {}?"),
+    ("flash-flood", "Flash flood warning in {}?"),
+    ("blizzard-warning", "Blizzard warning for {}?"),
+    ("coastal-flood", "Coastal flood in {}?"),
+    ("extreme-heat", "Extreme heat advisory {}?"),
+    ("peak-wind-speed", "Peak wind speed in {}?"),
+    ("drought-index", "Drought index for {}?"),
+]
+
 
 class PolymarketClient:
     def __init__(
@@ -412,7 +427,6 @@ class PolymarketClient:
         )
 
     def _next_demo_events(self, wallets: list[str]) -> list[dict[str, Any]]:
-        # Emit at most one event every few polls to simulate sparse target flow
         self._demo_cursor += 1
         if self._demo_cursor % 3 != 0:
             return []
@@ -421,14 +435,19 @@ class PolymarketClient:
         city = cities[self._demo_cursor % len(cities)]
         wallet = wallets[self._demo_cursor % len(wallets)]
         now = datetime.now(timezone.utc) - timedelta(milliseconds=int(self._rng.integers(220, 640)))
-        slug = f"highest-temperature-in-{city.lower().replace(' ', '-')}"
+
+        wt_idx = self._demo_cursor % len(_WEATHER_TYPES)
+        wt_slug, wt_title = _WEATHER_TYPES[wt_idx]
+        slug = f"{wt_slug}-in-{city.lower().replace(' ', '-')}"
+        title = wt_title.format(city)
+
         return [
             {
                 "id": f"demo-{self._demo_cursor}",
                 "wallet": wallet,
                 "timestamp": now.isoformat(),
                 "market_slug": slug,
-                "market_title": f"Highest temperature in {city}?",
+                "market_title": title,
                 "city": city,
                 "outcome": str(self._rng.choice(["Yes", "No", "70-71°F", "Above 72°F"])),
                 "side": "BUY",

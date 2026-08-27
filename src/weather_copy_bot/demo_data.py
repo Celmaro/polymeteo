@@ -38,6 +38,21 @@ CITIES = [
     "Sydney",
 ]
 
+WEATHER_TYPES = [
+    ("highest-temperature", "Highest temperature in {}?", "temperature"),
+    ("will-it-rain", "Will it rain in {}?", "rain"),
+    ("hurricane-category", "Hurricane {} on {}?", "hurricane"),
+    ("daily-snowfall", "Daily snowfall in {}?", "snow"),
+    ("severe-thunderstorm", "Severe thunderstorm in {}?", "storm"),
+    ("tornado-risk", "Tornado risk in {}?", "tornado"),
+    ("flash-flood", "Flash flood warning in {}?", "flood"),
+    ("blizzard-warning", "Blizzard warning for {}?", "blizzard"),
+    ("coastal-flood", "Coastal flood in {}?", "flood"),
+    ("extreme-heat", "Extreme heat advisory {}?", "temperature"),
+    ("wind-speed", "Peak wind speed in {}?", "wind"),
+    ("drought-index", "Drought index for {}?", "drought"),
+]
+
 TARGET_WALLETS = [
     {
         "wallet": "0x7a21c4e8b9f0d3a6e1c58294f0ab73d6e8c91f22",
@@ -113,13 +128,16 @@ class DefaultDemoDataGenerator(DemoDataGenerator):
             peak = max(peak, equity)
             dd = ((equity - peak) / peak) * 100.0 if peak else 0.0
 
+            wt_slug, wt_title, _ = WEATHER_TYPES[i % len(WEATHER_TYPES)]
+            wt_slug = f"{wt_slug}-in-{city.lower().replace(' ', '-')}-on-date"
+            wt_title = wt_title.format(city)
             fills.append(
                 Fill(
                     fill_id=f"{mode}-{i:04d}",
                     signal_id=f"sig-{mode}-{i:04d}",
                     target_wallet=wallet["wallet"],
-                    market_slug=f"highest-temperature-in-{city.lower().replace(' ', '-')}-on-date",
-                    market_title=f"Highest temperature in {city}?",
+                    market_slug=wt_slug,
+                    market_title=wt_title,
                     city=city,
                     outcome=str(
                         self._rng.choice(["Yes", "No", "68-69°F", "70-71°F", "Above 72°F"])
