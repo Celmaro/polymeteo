@@ -1,0 +1,141 @@
+services:
+  # ── Core Bot ─────────────────────────────────────────────────────────────────
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: polymeteo-bot
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      APP_ROOT: /app
+      ENGINE_ENABLED: "false"
+      WALLET_DISCOVERY_ENABLED: "false"
+      DRY_RUN: "true"
+      POLL_INTERVAL_MS: "100"
+      SENTRY_DSN: "${SENTRY_DSN:-}"
+      SENTRY_ENVIRONMENT: "${SENTRY_ENVIRONMENT:-production}"
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    networks:
+      - polymeteo-net
+
+  # ── Observability Stack ─────────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.54.0
+    container_name: polymeteo-prometheus
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+      - --web.enable-lifecycle
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./ops/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    networks:
+      - polymeteo-net
+
+  grafana:
+    image: grafana/grafana:10.4.0
+    container_name: polymeteo-grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: "${GRAFANA_USER:-admin}"
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_PASSWORD:-polymeteo}"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_FEATURE_TOGGLES_ENABLE: publicDashboards
+    volumes:
+      - ./ops/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./ops/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    networks:
+      - polymeteo-net
+
+  sentry:
+    image: sentry/self-hosted:2024.4.0
+    container_name: polymeteo-sentry
+    restart: unless-stopped
+    ports:
+      - "9000:9000"
+    environment:
+      SENTRY_SECRET_KEY: "${SENTRY_SECRET_KEY:-change-me-in-prod}"
+      SENTRY_DB_PASSWORD: "${SENTRY_DB_PASSWORD:-sentry}"
+      SENTRY_SMTP_HOSTNAME: "${SMTP_HOST:-}"
+      SENTRY_SMTP_PORT: "${SMTP_PORT:-}"
+      SENTRY_SMTP_USER: "${SMTP_USER:-}"
+      SENTRY_SMTP_PASSWORD: "${SMTP_PASSWORD:-}"
+      SENTRY_EMAIL_USE_TLS: "${SMTP_USE_TLS:-false}"
+      SENTRY_SERVER_EMAIL: "${SENTRY_FROM_EMAIL:-noreply@example.com}"
+    volumes:
+      - sentry-data:/var/lib/sentry
+    networks:
+      - polymeteo-net
+
+  n8n:
+    image: n8nio/n8n:1.60.0
+    container_name: polymeteo-n8n
+    restart: unless-stopped
+    ports:
+      - "5678:5678"
+    environment:
+      - N8N_BASIC_AUTH_ACTIVE=true
+      - N8N_BASIC_AUTH_USER=admin
+      - N8N_BASIC_AUTH_PASSWORD=${N8N_PASSWORD:-polymeteo}
+      - N8N_HOST=${N8N_HOST:-0.0.0.0}
+      - N8N_PROTOCOL=http
+      - N8N_PORT=5678
+      - WEBHOOK_URL=${WEBHOOK_URL:-http://localhost:5678}
+      - EXECUTIONS_MODE=regular
+      - EXECUTIONS_TIMEOUT=60
+      - GENERIC_TIMEZONE=UTC
+      # Slack (optional — enable via env vars)
+      - SLACK_CLIENT_ID=${SLACK_CLIENT_ID:-}
+      - SLACK_CLIENT_SECRET=${SLACK_CLIENT_SECRET:-}
+    env_file:
+      - .env
+    volumes:
+      - n8n-data:/home/node/.n8n
+      - ./ops/n8n/workflows:/workflows:ro
+    networks:
+      - polymeteo-net
+
+  # ── Optional: Cloudflare Tunnel (expose Grafana without opening ports) ────────
+  cloudflare-tunnel:
+    image: cloudflare/cloudflared:2024.4
+    container_name: polymeteo-tunnel
+    restart: unless-stopped
+    command: tunnel run --token ${CLOUDFLARE_TUNNEL_TOKEN:-}
+    environment:
+      - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN:-}
+    profiles:
+      - tunnel
+    networks:
+      - polymeteo-net
+
+# ── Volumes ──────────────────────────────────────────────────────────────────
+volumes:
+  prometheus-data:
+  grafana-data:
+  sentry-data:
+  n8n-data:
+
+# ── Network ───────────────────────────────────────────────────────────────────
+networks:
+  polymeteo-net:
+    driver: bridge

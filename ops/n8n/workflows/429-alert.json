@@ -1,0 +1,132 @@
+{
+  "name": "Polymeteo 429 Alert Workflow",
+  "nodes": [
+    {
+      "id": "webhook-in",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "position": [250, 300],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "polymeteo-429-alert",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "webhookId": "polymeteo-429-alert"
+    },
+    {
+      "id": "parse-json",
+      "name": "Parse Prometheus Alert",
+      "type": "n8n-nodes-base.set",
+      "position": [500, 300],
+      "parameters": {
+        "mode": "manual",
+        "duplicateItem": false,
+        "assignments": {
+          "assignments": [
+            { "name": "alert_name", "value": "={{ JSON.parse($json.body).alertname }}" },
+            { "name": "severity", "value": "={{ JSON.parse($json.body).severity }}" },
+            { "name": "value", "value": "={{ JSON.parse($json.body).value }}" },
+            { "name": "instance", "value": "={{ JSON.parse($json.body).labels.instance }}" }
+          ]
+        },
+        "options": {}
+      },
+      "typeVersion": 2
+    },
+    {
+      "id": "switch-alert-type",
+      "name": "Switch on Alert Type",
+      "type": "n8n-nodes-base.switch",
+      "position": [750, 300],
+      "parameters": {
+        "dataType": "string",
+        "value1": "={{ $json.alert_name }}",
+        "rules": {
+          "rules": [
+            { "value2": "PolymeteoHigh429Rate", "operation": "equals", "output": 0 },
+            { "value2": "PolymeteoEngineDown", "operation": "equals", "output": 1 },
+            { "value2": "PolymeteoHighLatency", "operation": "equals", "output": 2 }
+          ]
+        },
+        "fallbackOutput": 3
+      },
+      "typeVersion": 1
+    },
+    {
+      "id": "slack-notify",
+      "name": "Notify Slack",
+      "type": "n8n-nodes-base.slack",
+      "position": [1000, 100],
+      "parameters": {
+        "resource": "message",
+        "operation": "postMessage",
+        "channel": "={{ $env.SLACK_CHANNEL }}",
+        "text": "=:rotating_light: *Polymeteo Alert*\n\n*Alert:* `{{ $json.alert_name }}`\n*Severity:* `{{ $json.severity }}`\n*Value:* `{{ $json.value }}`\n*Instance:* `{{ $json.instance }}`\n\nTime: `{{ $now }}`",
+        "options": {}
+      },
+      "credentials": {
+        "slackOAuth2": {
+          "id": "slack-creds",
+          "name": "Slack OAuth2"
+        }
+      }
+    },
+    {
+      "id": "log-429",
+      "name": "Log to Console",
+      "type": "n8n-nodes-base.noOp",
+      "position": [1000, 300],
+      "parameters": {},
+      "notesInFlight": "Unknown alert type - acknowledge and skip"
+    },
+    {
+      "id": "email-alert",
+      "name": "Email Alert",
+      "type": "n8n-nodes-base.emailSend",
+      "position": [1000, 500],
+      "parameters": {
+        "to": "={{ $env.ALERT_EMAIL }}",
+        "subject": "=:rotating_light: Polymeteo: {{ $json.alert_name }}",
+        "text": "=Alert: {{ $json.alert_name }}\nSeverity: {{ $json.severity }}\nValue: {{ $json.value }}\nInstance: {{ $json.instance }}\nTime: {{ $now }}"
+      },
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "gmail-creds",
+          "name": "Gmail OAuth2"
+        }
+      }
+    },
+    {
+      "id": "acknowledge",
+      "name": "Acknowledge",
+      "type": "n8n-nodes-base.noOp",
+      "position": [1200, 300],
+      "parameters": {},
+      "notesInFlight": "Unknown alert type - acknowledge and skip"
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [[{ "node": "Parse Prometheus Alert", "type": "main", "index": 0 }]]
+    },
+    "Parse Prometheus Alert": {
+      "main": [[{ "node": "Switch on Alert Type", "type": "main", "index": 0 }]]
+    },
+    "Switch on Alert Type": {
+      "main": [
+        [{ "node": "Notify Slack", "type": "main", "index": 0 }],
+        [{ "node": "Notify Slack", "type": "main", "index": 0 }],
+        [{ "node": "Log to Console", "type": "main", "index": 0 }],
+        [{ "node": "Acknowledge", "type": "main", "index": 0 }]
+      ]
+    },
+    "Notify Slack": { "main": [[]] },
+    "Log to Console": { "main": [[]] },
+    "Email Alert": { "main": [[]] },
+    "Acknowledge": { "main": [[]] }
+  },
+  "active": false,
+  "settings": {},
+  "id": "polymeteo-429-alert"
+}
