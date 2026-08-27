@@ -32,6 +32,7 @@ def _signal(
     city: str = "New York",
     side: Side = Side.BUY,
     token_id: str | None = None,
+    upstream_age_ms: int = 0,
 ) -> TradeSignal:
     now = datetime.now(timezone.utc)
     return TradeSignal(
@@ -48,6 +49,7 @@ def _signal(
         target_filled_at=now,
         latency_ms=latency_ms,
         token_id=token_id,
+        upstream_age_ms=upstream_age_ms,
     )
 
 
@@ -571,9 +573,12 @@ class TestEngineEventLogging:
         with caplog.at_level(logging.INFO):
             await engine._route_signal({}, _signal())
         messages = [r.getMessage() for r in caplog.records]
-        assert any(m.startswith("SIGNAL BUY") for m in messages)
         assert any(m.startswith("COPY BUY") for m in messages)
         assert not any(m.startswith("SKIP") for m in messages)
+        with caplog.at_level(logging.DEBUG):
+            await engine._route_signal({}, _signal())
+        debug_msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG]
+        assert any(m.startswith("SIGNAL BUY") for m in debug_msgs)
 
     @pytest.mark.asyncio
     async def test_route_signal_logs_skip_with_reason(self, caplog):
@@ -581,8 +586,11 @@ class TestEngineEventLogging:
         with caplog.at_level(logging.INFO):
             await engine._route_signal({}, _signal(latency_ms=900))
         messages = [r.getMessage() for r in caplog.records]
-        assert any(m.startswith("SIGNAL BUY") for m in messages)
         assert any(m.startswith("SKIP ") and "stale" in m.lower() for m in messages)
+        with caplog.at_level(logging.DEBUG):
+            await engine._route_signal({}, _signal(latency_ms=900))
+        debug_msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG]
+        assert any(m.startswith("SIGNAL BUY") for m in debug_msgs)
 
     @pytest.mark.asyncio
     async def test_consensus_logs_quorum_copy_and_skip(self, caplog):
@@ -774,6 +782,234 @@ class TestPollFailureBackoff:
         asyncio.run(_scenario())
 
         assert engine._running is False
+
+
+class TestPercentile:
+    """Audit P1: _percentile must interpolate correctly on any sample size."""
+
+    def test_empty_returns_none(self):
+        assert CopyEngine._percentile([], 50.0) is None
+
+    def test_single_sample_returns_that_value(self):
+        assert CopyEngine._percentile([350], 50.0) == 350
+        assert CopyEngine._percentile([350], 99.0) == 350
+
+    def test_p50_is_median(self):
+        assert CopyEngine._percentile([100, 200, 300], 50.0) == 200
+
+    def test_p99_interpolates_toward_max(self):
+        assert CopyEngine._percentile([100, 200, 300, 400, 500], 99.0) > 400
+
+
+class TestLatencyHistogram:
+    """Audit P1: _record_latency_sample must populate rolling percentile stats."""
+
+    def test_samples_window_capped_at_1000(self):
+        engine = CopyEngine()
+        for i in range(1200):
+            engine._record_latency_sample(i, i)
+        assert len(engine._latency_samples) == 1000
+        assert len(engine._upstream_age_samples) == 1000
+        assert engine._latency_samples[0] == 200
+
+    @pytest.mark.asyncio
+    async def test_latency_samples_recorded_via_poll_once(self):
+        engine = CopyEngine(Settings(target_wallets=["0xtarget"]))
+        engine.client.fetch_target_activity = AsyncMock(return_value=[])
+        await engine.poll_once()
+        assert engine.stats["latency_p50_ms"] is None
+        assert engine.stats["latency_p99_ms"] is None
+        assert engine.stats["upstream_age_p50_ms"] is None
+        assert engine.stats["upstream_age_p99_ms"] is None
+
+    def test_percentiles_in_stats_snapshot_after_samples(self, caplog):
+        engine = CopyEngine()
+        for i in range(10):
+            engine._record_latency_sample(100 + i * 10, 200 + i * 20)
+        with caplog.at_level(logging.INFO):
+            engine._log_stats_snapshot()
+        msg = next(r.getMessage() for r in caplog.records if r.getMessage().startswith("STATS"))
+        assert "latency_p50=" in msg
+        assert "latency_p99=" in msg
+        assert "age_p50=" in msg
+        assert "age_p99=" in msg
+
+
+class Test429RollingWindow:
+    """Audit P4: upstream_429_last_5m must be a 300-second rolling window."""
+
+    def test_initial_rolling_count_is_zero(self):
+        engine = CopyEngine()
+        assert engine.stats["upstream_429_last_5m"] == 0
+
+    def test_record_rate_limit_updates_rolling_count(self):
+        engine = CopyEngine()
+        engine.record_rate_limit("gamma-api.polymarket.com", 1.0)
+        assert engine.stats["upstream_429_rejections"] == 1
+        assert engine.stats["upstream_429_last_5m"] == 1
+        engine.record_rate_limit("gamma-api.polymarket.com", 1.0)
+        assert engine.stats["upstream_429_last_5m"] == 2
+
+    def test_old_429s_pruned_from_rolling_window(self, caplog):
+        engine = CopyEngine()
+        now = time.time()
+        engine._upstream_429_ts = [now - 600.0, now - 400.0, now - 100.0]
+        with caplog.at_level(logging.INFO):
+            engine._log_stats_snapshot()
+        assert engine.stats["upstream_429_last_5m"] == 1
+
+
+class TestSingleSourceMode:
+    """Audit P2: single_source_mode must lower quorum min to 1 with one wallet."""
+
+    @pytest.mark.asyncio
+    async def test_single_source_mode_lowers_quorum_min(self, caplog):
+        settings = Settings(target_wallets=["0xone"], single_source_mode=True)
+        engine = CopyEngine(
+            settings=settings,
+            quorum=QuorumEngine(min_quorum_count=2),
+        )
+        engine.poll_once = AsyncMock(return_value=[])
+        with caplog.at_level(logging.INFO):
+            await engine.run(duration_sec=0.05)
+        assert any("single_source_mode: quorum min lowered 2 -> 1" in r.getMessage() for r in caplog.records)
+        assert engine.quorum.min_quorum_count == 1
+
+    @pytest.mark.asyncio
+    async def test_single_source_mode_not_engaged_without_flag(self, caplog):
+        settings = Settings(target_wallets=["0xone"], single_source_mode=False)
+        engine = CopyEngine(
+            settings=settings,
+            quorum=QuorumEngine(min_quorum_count=2),
+        )
+        engine.poll_once = AsyncMock(return_value=[])
+        with caplog.at_level(logging.INFO):
+            await engine.run(duration_sec=0.05)
+        assert not any("single_source_mode" in r.getMessage() for r in caplog.records)
+        assert engine.quorum.min_quorum_count == 2
+
+    @pytest.mark.asyncio
+    async def test_single_source_mode_not_engaged_with_multiple_wallets(self, caplog):
+        settings = Settings(target_wallets=["0xone", "0xtwo"], single_source_mode=True)
+        engine = CopyEngine(
+            settings=settings,
+            quorum=QuorumEngine(min_quorum_count=2),
+        )
+        engine.poll_once = AsyncMock(return_value=[])
+        with caplog.at_level(logging.INFO):
+            await engine.run(duration_sec=0.05)
+        assert not any("single_source_mode" in r.getMessage() for r in caplog.records)
+        assert engine.quorum.min_quorum_count == 2
+
+
+class TestSignalCycleSummary:
+    """Audit P3: one SIGNAL-CYCLE line per poll replaces per-signal noise at INFO."""
+
+    @pytest.mark.asyncio
+    async def test_signal_cycle_emitted_on_fresh_and_copy(self, caplog):
+        engine = CopyEngine(Settings(max_copy_latency_ms=800))
+        engine.client.fetch_target_activity = AsyncMock(return_value=[{
+            "id": "evt-fresh",
+            "wallet": "0xabc",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "market_slug": "weather",
+            "market_title": "Weather?",
+            "city": "Tokyo",
+            "outcome": "Yes",
+            "side": "BUY",
+            "price": 0.6,
+            "size_usd": 100,
+            "demo": True,
+            "latency_ms": 350,
+        }])
+        with caplog.at_level(logging.INFO):
+            await engine.poll_once()
+        msgs = [r.getMessage() for r in caplog.records]
+        cycle_msgs = [m for m in msgs if m.startswith("SIGNAL-CYCLE")]
+        assert len(cycle_msgs) == 1
+        assert "BUY=1" in cycle_msgs[0]
+        assert "SKIP-stale=0" in cycle_msgs[0]
+        assert "SKIP-other=0" in cycle_msgs[0]
+        assert not any(m.startswith("SIGNAL BUY") for m in msgs)
+
+    @pytest.mark.asyncio
+    async def test_signal_cycle_counts_skip_stale_and_other(self, caplog):
+        engine = CopyEngine(Settings(max_copy_latency_ms=100))
+        now = datetime.now(timezone.utc)
+        engine.client.fetch_target_activity = AsyncMock(return_value=[
+            {
+                "id": "evt-stale",
+                "wallet": "0xabc",
+                "timestamp": (now - __import__("datetime").timedelta(seconds=2)).isoformat(),
+                "market_slug": "weather",
+                "market_title": "Weather?",
+                "city": "Tokyo",
+                "outcome": "Yes",
+                "side": "SELL",
+                "price": 0.6,
+                "size_usd": 100,
+            },
+            {
+                "id": "evt-thin",
+                "wallet": "0xdef",
+                "timestamp": now.isoformat(),
+                "market_slug": "weather2",
+                "market_title": "Weather2?",
+                "city": "Paris",
+                "outcome": "No",
+                "side": "BUY",
+                "price": 0.50,
+                "size_usd": 100,
+                "demo": True,
+                "latency_ms": 350,
+            },
+        ])
+        with caplog.at_level(logging.INFO):
+            await engine.poll_once()
+        cycle_msgs = [m for m in caplog.records if m.getMessage().startswith("SIGNAL-CYCLE")]
+        assert len(cycle_msgs) == 1
+        assert "SKIP-stale=1" in cycle_msgs[0].getMessage()
+        assert "SKIP-other=0" in cycle_msgs[0].getMessage()
+        assert "BUY=0" in cycle_msgs[0].getMessage()
+        assert "SELL=1" in cycle_msgs[0].getMessage()
+
+
+class TestStartupWalletAudit:
+    """Audit P5: startup log must name the resolved wallet list explicitly."""
+
+    @pytest.mark.asyncio
+    async def test_startup_logs_wallet_list(self, caplog):
+        engine = CopyEngine(Settings(target_wallets=["0xw1", "0xw2"]))
+        engine.poll_once = AsyncMock(return_value=[])
+        with caplog.at_level(logging.INFO):
+            task = asyncio.create_task(engine.run(duration_sec=0.05))
+            await asyncio.wait_for(task, timeout=1.0)
+        startup = next(
+            r.getMessage()
+            for r in caplog.records
+            if r.getMessage().startswith("CopyEngine starting")
+        )
+        assert "static=2" in startup
+        assert "['0xw1', '0xw2']" in startup
+        assert "wallets=" in startup
+
+
+class TestStatsSnapshotNewFields:
+    """Audit P1+P4: STATS line must include all rolling percentile and 429 window fields."""
+
+    def test_stats_snapshot_includes_p1_and_p4_fields(self, caplog):
+        engine = CopyEngine()
+        engine._record_latency_sample(100, 200)
+        engine._record_latency_sample(500, 600)
+        with caplog.at_level(logging.INFO):
+            engine._log_stats_snapshot()
+        msg = next(r.getMessage() for r in caplog.records if r.getMessage().startswith("STATS"))
+        assert "upstream_429=" in msg
+        assert "upstream_429_5m=" in msg
+        assert "latency_p50=" in msg
+        assert "latency_p99=" in msg
+        assert "age_p50=" in msg
+        assert "age_p99=" in msg
 
 
 class TestRateLimitObserver:

@@ -16,7 +16,6 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from weather_copy_bot.live.order_queue import OrderQueue
     from weather_copy_bot.live.signer import CLOBExecutor
-    from weather_copy_bot.ops.notifications import NotificationHandler
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +30,6 @@ class ShutdownReason(str, Enum):
     CONNECTIVITY_FAILURE = "connectivity_failure"
     API_ERROR = "api_error"
     RISK_LIMIT_BREACH = "risk_limit_breach"
-    TELEGRAM_COMMAND = "telegram_command"
     UNKNOWN = "unknown"
 
 
@@ -72,7 +70,7 @@ class EmergencyShutdown:
     Emergency shutdown system for live trading.
 
     Features:
-    - Manual shutdown via Telegram or code
+    - Manual shutdown via code
     - Automated circuit breakers (daily loss, drawdown)
     - Connectivity failure detection
     - Graceful position/orders cleanup
@@ -81,7 +79,6 @@ class EmergencyShutdown:
     - Daily loss limit reached
     - Circuit breaker triggered
     - Connectivity failure
-    - Telegram command
     - Manual API call
     """
 
@@ -109,7 +106,6 @@ class EmergencyShutdown:
         # Dependencies (set via set_dependencies)
         self._order_queue: OrderQueue | None = None
         self._executor: CLOBExecutor | None = None
-        self._notifier: NotificationHandler | None = None
         self._get_balance_fn: Callable[[], Awaitable[float]] | None = None
         self._get_positions_fn: Callable[[], Awaitable[list[dict]]] | None = None
 
@@ -133,14 +129,12 @@ class EmergencyShutdown:
         self,
         order_queue: OrderQueue,
         executor: CLOBExecutor,
-        notifier: NotificationHandler,
         get_balance_fn: Callable[[], Awaitable[float]],
         get_positions_fn: Callable[[], Awaitable[list[dict]]],
     ) -> None:
         """Set dependencies for shutdown operations."""
         self._order_queue = order_queue
         self._executor = executor
-        self._notifier = notifier
         self._get_balance_fn = get_balance_fn
         self._get_positions_fn = get_positions_fn
 
@@ -157,8 +151,7 @@ class EmergencyShutdown:
         2. Cancel all pending orders
         3. Close all positions (paper mode: mark closed)
         4. Log event
-        5. Notify via Telegram/Discord
-        6. Set system state to SHUTDOWN
+        5. Set system state to SHUTDOWN
         """
         async with self._shutdown_lock:
             if self._state == SystemState.SHUTDOWN:
@@ -220,7 +213,7 @@ class EmergencyShutdown:
                 )
 
             # Step 3: Create event (append close failures so they reach the
-            # log, the persisted event, and the alert)
+            # log and the persisted event)
             full_details = details
             if position_failures:
                 failure_summary = "; ".join(position_failures)
@@ -241,24 +234,7 @@ class EmergencyShutdown:
             )
             self._shutdown_log.append(event)
 
-            # Step 4: Notify
-            if self._notifier:
-                try:
-                    await self._notifier.send_emergency_alert(
-                        title=f"🔴 EMERGENCY SHUTDOWN: {reason.value}",
-                        message=f"""
-Details: {full_details}
-Balance: ${balance:.2f}
-Daily P&L: ${self._daily_loss:.2f}
-Positions closed: {positions_closed}
-Orders cancelled: {pending_cancelled}
-Duration: {time.time() - start_time:.2f}s
-""",
-                    )
-                except Exception as e:
-                    logger.error(f"[SHUTDOWN] Notification failed: {e}")
-
-            # Step 5: Set final state
+            # Step 4: Set final state
             self._state = SystemState.SHUTDOWN
 
             logger.critical(

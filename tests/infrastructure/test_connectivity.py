@@ -24,8 +24,6 @@ class ServiceName(str, Enum):
     POSTGRESQL = "postgresql"
     REDIS = "redis"
     OPENWEATHER_API = "openweather_api"
-    TELEGRAM_BOT = "telegram_bot"
-    DISCORD_WEBHOOK = "discord_webhook"
 
 
 @dataclass
@@ -49,7 +47,6 @@ class LatencyThresholds:
     postgresql_p95 = 50
     redis_p95 = 20
     openweather_p95 = 500
-    telegram_p95 = 300
 
     # Fail thresholds
     polymarket_api_fail = 2000

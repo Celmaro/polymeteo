@@ -123,27 +123,6 @@ def _live_engine_status(engine: CopyEngine) -> dict[str, Any]:
     }
 
 
-class _NullNotifier:
-    """No-op notification sink that satisfies the ``send_alert`` protocol.
-
-    ``MonitoringService.set_dependencies`` types its notifier parameter as
-    ``NotificationHandler`` (a forward reference in :mod:`ops.monitoring`). The
-    only contract we need to satisfy is ``await send_alert(title, message,
-    severity)`` — see ``FlakyNotifier`` in ``tests/test_monitoring_service.py``.
-    Keeping this class private to ``app.py`` avoids leaking a sentinel type
-    into the public surface while still letting the background update /
-    alert / hourly-report loops run.
-    """
-
-    async def send_alert(self, title: str, message: str, severity: str = "info") -> bool:
-        logger.debug("[MONITOR] alert suppressed (null notifier): %s", title)
-        return True
-
-    async def send_message(self, text: str, chat_id: int | None = None) -> bool:
-        logger.debug("[MONITOR] message suppressed (null notifier)")
-        return True
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Run the copy-trading engine inside the API process when enabled.
@@ -188,16 +167,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 settings.quorum_max_acceptable_price,
             )
         # Monitoring service: count quorum hits/skips via the engine hooks AND
-        # run the dashboard / alert / hourly-report background loops. The
-        # notifier is the in-process null sink; a real Telegram transport can
-        # replace it once TELEGRAM_BOT_TOKEN is wired through Settings.
+        # run the dashboard / alert background loops.
         monitor = MonitoringService() if quorum_engine is not None else None
         if monitor is not None:
             async def _get_metrics() -> dict[str, Any]:
                 # ``_live_engine_status`` is sync; wrap so the monitoring loop
                 # can ``await`` it without blocking the event loop.
                 return _live_engine_status(engine)
-            monitor.set_dependencies(_NullNotifier(), _get_metrics)
+            monitor.set_dependencies(_get_metrics)
         engine = CopyEngine(
             settings=settings,
             target_provider=provider,
@@ -207,9 +184,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.engine = engine
         task = asyncio.create_task(engine.run(), name="copy-engine")
         if monitor is not None:
-            # ``start()`` schedules update_loop / alert_loop / hourly_report
-            # background tasks and returns immediately. ``stop()`` cancels
-            # them at shutdown below.
+            # ``start()`` schedules update_loop / alert_loop background tasks
+            # and returns immediately. ``stop()`` cancels them at shutdown below.
             await monitor.start()
             logger.info(
                 "MonitoringService started update_interval_s=%s alert_interval_s=%s",

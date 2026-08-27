@@ -140,8 +140,31 @@ class CopyEngine:
             "live_orders_throttled": 0,
             "dry_run": True,
             "upstream_429_rejections": 0,
+            # Audit P4: 5-minute rolling count of upstream 429s. The monotonic
+            # ``upstream_429_rejections`` lifetime counter is preserved for
+            # post-mortem, while this windowed value tells operators whether
+            # the bot is currently being throttled (every STATS line ticks
+            # up) vs saw a transient spike earlier in the run.
+            "upstream_429_last_5m": 0,
+            # Audit P1: p50/p99 percentiles of local latency and upstream age.
+            # Computed on a rolling window in _log_stats_snapshot; ``None``
+            # until the first batch of samples arrives.
+            "latency_p50_ms": None,
+            "latency_p99_ms": None,
+            "upstream_age_p50_ms": None,
+            "upstream_age_p99_ms": None,
             "signals_by_reason": {},
         }
+
+        # Rolling samples for the latency / upstream-age percentile histograms
+        # (audit P1). Capped so a long-running process cannot grow them without
+        # bound; oldest sample is evicted on overflow.
+        self._latency_samples: list[int] = []
+        self._upstream_age_samples: list[int] = []
+        # Audit P4: timestamps of every 429 observed since start; pruned to a
+        # 5-minute window on each STATS log so the windowed count stays O(N).
+        self._upstream_429_ts: list[float] = []
+        self._HIST_MAX_SAMPLES = 1000
 
         # Always route the client's 429 events through the engine so the
         # ``upstream_429_rejections`` counter ticks regardless of how the
@@ -250,19 +273,64 @@ class CopyEngine:
     def record_rate_limit(self, host: str, retry_after: float) -> None:
         """Observer invoked by PolymarketClient when an upstream returns 429.
 
-        Keeps the counter monotonic;``signals_by_reason`` already exposes the
-        full skip taxonomy so the dashboard can render ``429`` counts there
-        without an extra dimension.
+        Keeps the lifetime counter monotonic;``signals_by_reason`` already
+        exposes the full skip taxonomy so the dashboard can render ``429``
+        counts there without an extra dimension. The 5-minute rolling window
+        (audit P4) lives in ``self._upstream_429_ts`` and is pruned on every
+        STATS log so the operator sees current vs lifetime throttle pressure.
         """
         self.stats["upstream_429_rejections"] += 1
         self.stats["signals_by_reason"].setdefault("upstream_429", 0)
         self.stats["signals_by_reason"]["upstream_429"] += 1
+        self._upstream_429_ts.append(time.time())
+        # Cheap O(N) prune: drop anything older than the window. _log_stats_snapshot
+        # also prunes on every STATS tick so this list never exceeds a handful
+        # of entries between snapshots.
+        cutoff = time.time() - 300.0
+        self._upstream_429_ts = [ts for ts in self._upstream_429_ts if ts >= cutoff]
+        self.stats["upstream_429_last_5m"] = len(self._upstream_429_ts)
         logger.warning(
-            "upstream 429 on %s retry_after=%.1fs total=%d",
+            "upstream 429 on %s retry_after=%.1fs total=%d last_5m=%d",
             host,
             retry_after,
             self.stats["upstream_429_rejections"],
+            self.stats["upstream_429_last_5m"],
         )
+
+    def _record_latency_sample(self, latency_ms: int, upstream_age_ms: int) -> None:
+        """Record one local-latency and one upstream-age sample (audit P1).
+
+        Both windows are capped at ``_HIST_MAX_SAMPLES`` so percentiles stay
+        cheap and reflect recent traffic, not lifetime. ``latency_ms`` is the
+        local processing lag (0 in production where we have no detect-side
+        clock), ``upstream_age_ms`` is the age of the upstream event when we
+        received it.
+        """
+        self._latency_samples.append(max(0, int(latency_ms)))
+        self._upstream_age_samples.append(max(0, int(upstream_age_ms)))
+        if len(self._latency_samples) > self._HIST_MAX_SAMPLES:
+            self._latency_samples = self._latency_samples[-self._HIST_MAX_SAMPLES:]
+        if len(self._upstream_age_samples) > self._HIST_MAX_SAMPLES:
+            self._upstream_age_samples = self._upstream_age_samples[-self._HIST_MAX_SAMPLES:]
+
+    @staticmethod
+    def _percentile(samples: list[int], p: float) -> int | None:
+        """Return the p-th percentile (0..100) of ``samples`` via linear interp.
+
+        Returns None when the window is empty. Linear interpolation between
+        adjacent ranks so a single-sample window returns that sample at every
+        percentile rather than rounding to a bucket floor.
+        """
+        if not samples:
+            return None
+        if len(samples) == 1:
+            return int(samples[0])
+        ordered = sorted(samples)
+        rank = (p / 100.0) * (len(ordered) - 1)
+        lo = int(rank)
+        hi = min(lo + 1, len(ordered) - 1)
+        frac = rank - lo
+        return int(round(ordered[lo] * (1 - frac) + ordered[hi] * frac))
 
     # Stable bucket keys for the skip-reason histogram. The raw reason strings
     # carry variable suffixes (e.g. ``stale_signal:850ms``,
@@ -271,6 +339,7 @@ class CopyEngine:
     # into per-fill reason keys.
     _SKIP_REASON_BUCKETS: dict[str, str] = {
         "stale_signal": "stale",
+        "stale_upstream": "stale",
         "stale": "stale",
         "risk_rejected": "risk_rejected",
         "clamp_below_min": "clamp_below_min",
@@ -450,6 +519,11 @@ class CopyEngine:
         )
         fresh: list[TradeSignal] = []
         now = datetime.now(timezone.utc)
+        # Per-cycle counters for the SIGNAL-CYCLE summary line (audit P3).
+        cycle_buys = 0
+        cycle_sells = 0
+        cycle_skip_stale = 0
+        cycle_skip_other = 0
         for event in events:
             key = (
                 event.get("id")
@@ -459,10 +533,17 @@ class CopyEngine:
                 continue
             self._remember(key, now_ts)
             target_filled = datetime.fromisoformat(event["timestamp"].replace("Z", "+00:00"))
-            latency_ms = int((now - target_filled).total_seconds() * 1000)
-            # When using demo stream, inject realistic detect latency
+            # Two-tier latency (audit P0): upstream_age_ms is how old the
+            # upstream event was when we received it (data staleness);
+            # latency_ms is the local detect-to-decision lag. The demo path
+            # injects a synthetic local latency so the existing ``latency_ms``
+            # semantic (local processing) stays meaningful even when upstream
+            # timestamps are absent.
+            upstream_age_ms = int((now - target_filled).total_seconds() * 1000)
             if event.get("demo"):
                 latency_ms = int(event.get("latency_ms", 420))
+            else:
+                latency_ms = 0
             signal = TradeSignal(
                 signal_id=str(uuid.uuid4()),
                 target_wallet=event["wallet"],
@@ -476,18 +557,46 @@ class CopyEngine:
                 detected_at=now,
                 target_filled_at=target_filled,
                 latency_ms=latency_ms,
+                upstream_age_ms=upstream_age_ms,
                 token_id=event.get("token_id"),
             )
             fresh.append(signal)
-            await self._route_signal(event, signal)
+            decision = await self._route_signal(event, signal)
+            if decision is not None:
+                if decision.should_copy:
+                    if signal.side == Side.BUY:
+                        cycle_buys += 1
+                    else:
+                        cycle_sells += 1
+                else:
+                    prefix = (decision.reason or "").split(":", 1)[0]
+                    if prefix in {"stale_signal", "stale_upstream"}:
+                        cycle_skip_stale += 1
+                    else:
+                        cycle_skip_other += 1
+
+        # Record upstream-age samples for the rolling histograms (audit P1).
+        for sig in fresh:
+            self._record_latency_sample(sig.latency_ms, sig.upstream_age_ms)
 
         self.stats["last_heartbeat"] = datetime.now(timezone.utc).isoformat()
+        # Per-cycle summary (audit P3): one SIGNAL-CYCLE line per poll keeps
+        # signal-level noise at DEBUG without losing observable signal mix.
+        if fresh or cycle_buys or cycle_sells or cycle_skip_stale or cycle_skip_other:
+            logger.info(
+                "SIGNAL-CYCLE fresh=%s BUY=%s SELL=%s SKIP-stale=%s SKIP-other=%s",
+                len(fresh),
+                cycle_buys,
+                cycle_sells,
+                cycle_skip_stale,
+                cycle_skip_other,
+            )
         self._save_seen()
         elapsed_ms = (time.perf_counter() - started) * 1000
         logger.debug("poll_once processed=%s elapsed_ms=%.1f", len(fresh), elapsed_ms)
         return fresh
 
-    async def _route_signal(self, event: dict, signal: TradeSignal) -> None:
+    async def _route_signal(self, event: dict, signal: TradeSignal) -> CopyDecision | None:
         """Process an individual fill, then feed the consensus buffer.
 
         Every fresh fill is copied (or skipped) exactly as before. When a
@@ -495,15 +604,22 @@ class CopyEngine:
         N distinct wallets on the same token/side fire consensus once.
         When settings.wallet_filter_enabled, a non-weather signal is gated out
         up front so it is neither copied nor counted as a quorum vote.
+        Returns the per-signal CopyDecision (or None when the wallet filter
+        rejects before any decision is made) so the per-cycle SIGNAL-CYCLE
+        summary line can count buys/sells/skips without re-deciding.
         """
-        logger.info(
-            "SIGNAL %s %s $%.2f @ %.3f wallet=%s latency=%sms",
+        # Per-signal trail demoted to DEBUG (audit P3); the SIGNAL-CYCLE line
+        # replaces it as the INFO-level summary so quiet stretches are still
+        # observable without spamming one line per fill.
+        logger.debug(
+            "SIGNAL %s %s $%.2f @ %.3f wallet=%s latency=%sms upstream_age=%sms",
             signal.side.value,
             signal.market_slug,
             signal.size_usd,
             signal.price,
             signal.target_wallet,
             signal.latency_ms,
+            signal.upstream_age_ms,
         )
         if self.settings.wallet_filter_enabled:
             allowed, reason = self.wallet_filter.should_copy(signal)
@@ -514,7 +630,7 @@ class CopyEngine:
                     signal.market_slug,
                     reason,
                 )
-                return
+                return None
         decision = await self.process_signal(signal)
         if decision.should_copy:
             logger.info(
@@ -527,7 +643,7 @@ class CopyEngine:
         else:
             logger.info("SKIP %s (%s)", signal.market_slug, decision.reason)
         if self.quorum is None:
-            return
+            return decision
         key = f"{signal.token_id or signal.market_slug}:{signal.side.value}"
         self._quorum_meta[key] = {
             "market_slug": signal.market_slug,
@@ -552,6 +668,7 @@ class CopyEngine:
             if self.monitor is not None:
                 self.monitor.record_quorum_hit()
             await self._process_consensus(result)
+        return decision
 
     async def _process_consensus(self, result: QuorumResult) -> None:
         """Turn one fired consensus into a single fresh copy decision.
@@ -575,6 +692,7 @@ class CopyEngine:
             detected_at=now,
             target_filled_at=now,
             latency_ms=0,
+            upstream_age_ms=0,
             token_id=result.token_id,
         )
         decision = await self.process_signal(
@@ -660,6 +778,20 @@ class CopyEngine:
         # operators whether ``live_orders_*`` zeros are expected (paper mode) or
         # worth investigating (live mode).
         s["dry_run"] = bool(self.settings.dry_run)
+        # Audit P4: re-prune the 429 window so the rolling count stays fresh
+        # even if no 429 has been observed recently (record_rate_limit also
+        # prunes, but a long quiet stretch after the last 429 leaves stale
+        # entries until the next event).
+        cutoff = time.time() - 300.0
+        self._upstream_429_ts = [ts for ts in self._upstream_429_ts if ts >= cutoff]
+        s["upstream_429_last_5m"] = len(self._upstream_429_ts)
+        # Audit P1: refresh p50/p99 for both latency dimensions from the
+        # rolling sample windows. Stored as ints in stats so dashboards can
+        # chart them directly without re-running percentile math.
+        s["latency_p50_ms"] = self._percentile(self._latency_samples, 50.0)
+        s["latency_p99_ms"] = self._percentile(self._latency_samples, 99.0)
+        s["upstream_age_p50_ms"] = self._percentile(self._upstream_age_samples, 50.0)
+        s["upstream_age_p99_ms"] = self._percentile(self._upstream_age_samples, 99.0)
         # Collapse the signals_by_reason histogram into a compact ``a=1,b=2``
         # suffix so a single STATS line still tells the operator why signals
         # were skipped (stale / size / edge / risk / dedup / upstream_429).
@@ -668,6 +800,7 @@ class CopyEngine:
             "STATS mode=%s detected=%s copied=%s skipped=%s risk_rejected=%s "
             "quorum_votes=%s reached=%s rejected=%s live_filled=%s live_failed=%s "
             "live_dup=%s live_throttled=%s targets=%s balance=$%.2f upstream_429=%s "
+            "upstream_429_5m=%s latency_p50=%s latency_p99=%s age_p50=%s age_p99=%s "
             "reasons={%s}",
             "paper" if s["dry_run"] else "live",
             s["signals_detected"],
@@ -684,6 +817,11 @@ class CopyEngine:
             len(self._resolve_wallets()),
             self._balance,
             s["upstream_429_rejections"],
+            s["upstream_429_last_5m"],
+            s["latency_p50_ms"] if s["latency_p50_ms"] is not None else "-",
+            s["latency_p99_ms"] if s["latency_p99_ms"] is not None else "-",
+            s["upstream_age_p50_ms"] if s["upstream_age_p50_ms"] is not None else "-",
+            s["upstream_age_p99_ms"] if s["upstream_age_p99_ms"] is not None else "-",
             reasons,
         )
 
@@ -699,14 +837,36 @@ class CopyEngine:
             await self.order_queue.start(self._execute_queued_order)
             started_queue = True
         wallets = self._resolve_wallets()
+        # Audit P5: surface the resolved wallet set explicitly so an operator
+        # can tell at a glance whether they have 1, 2, or 3 active targets
+        # (the long-standing "targets=2 vs default_demo_wallets=3" mystery
+        # resolves here). Useful even when static and discovered counts look
+        # fine on their own.
         logger.info(
-            "CopyEngine starting mode=%s targets=%s static=%s discovered=%s max_latency=%sms",
+            "CopyEngine starting mode=%s targets=%s static=%s discovered=%s max_latency=%sms wallets=%s",
             self.mode,
             len(wallets),
             len(self.settings.target_wallets),
             max(len(wallets) - len(self.settings.target_wallets), 0),
             self.settings.max_copy_latency_ms,
+            wallets,
         )
+        # Audit P2: when only one wallet is configured and single_source_mode
+        # is on, drop the consensus minimum to 1 so the layer is no longer
+        # structurally unreachable. Logged so an operator can spot when the
+        # bypass actually engages (otherwise the production deployment sits
+        # silent at quorum_min_count=2 with one source forever).
+        if (
+            self.quorum is not None
+            and len(wallets) == 1
+            and self.settings.single_source_mode
+        ):
+            if self.quorum.min_quorum_count != 1:
+                logger.info(
+                    "single_source_mode: quorum min lowered %s -> 1 (one wallet configured)",
+                    self.quorum.min_quorum_count,
+                )
+                self.quorum.min_quorum_count = 1
         started = time.time()
         last_stats_log = started
         interval = self.settings.poll_interval_ms / 1000.0

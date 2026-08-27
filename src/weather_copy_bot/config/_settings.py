@@ -30,6 +30,12 @@ class Settings(BaseSettings):
     max_position_usd: float = 250.0
     max_daily_loss_usd: float = 500.0
     min_edge_bps: float = 50.0
+    # Two-tier latency gate (audit P0): ``max_upstream_age_ms`` bounds the age of
+    # the upstream event we received (data staleness), while ``max_copy_latency_ms``
+    # bounds only the local processing lag between detect and decision. A fill
+    # whose upstream timestamp is hours old fails the upstream-age gate even if
+    # we detected it within 50 ms locally.
+    max_upstream_age_ms: int = 60_000
     max_copy_latency_ms: int = 800
     dry_run: bool = True
 
@@ -70,6 +76,21 @@ class Settings(BaseSettings):
     # floor specifically for the consensus path (agreement substitutes for
     # conviction). Leave at 5.0 to keep the floor identical to single-wallet.
     consensus_min_size_usd: float = 2.5
+
+    # Signal consensus window (audit P0b): wallets voting within this many
+    # milliseconds on the same token/side count toward the same quorum bucket.
+    # Independent from ``quorum_window_seconds`` (the absolute wall-clock window
+    # the QuorumEngine keeps for cleanup) so consensus can be tightened without
+    # changing how long votes are retained.
+    signal_consensus_window_ms: int = 5_000
+
+    # Single-source mode (audit P2): when the resolved target set has exactly
+    # one wallet, the quorum layer is structurally unreachable
+    # (``quorum_min_count`` defaults to 2). Set False to keep requiring an
+    # explicit second source, or True to relax the quorum requirement so a
+    # single-wallet deployment can actually fire. Defaults to True so the
+    # canonical "one wallet" production deployment is not silently dead.
+    single_source_mode: bool = True
 
     # Weather keyword gate applied in CopyEngine._route_signal before the
     # quorum layer. Defaults to False so behavior stays identical to prior

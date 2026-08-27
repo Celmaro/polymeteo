@@ -27,7 +27,12 @@ class TradeSignal(BaseModel):
     size_usd: float
     detected_at: datetime
     target_filled_at: datetime
-    latency_ms: int
+    # Two-tier latency (audit P0):
+    #   ``latency_ms``       - local processing lag between detect and decision
+    #   ``upstream_age_ms``  - age of the upstream event when we received it
+    # Defaults to 0 so historical replays and synthesized signals stay valid.
+    latency_ms: int = 0
+    upstream_age_ms: int = 0
     token_id: str | None = None
 
 

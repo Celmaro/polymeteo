@@ -240,11 +240,11 @@ class MonthlyReport:
 
 
 class ReportFormatter:
-    """Formats reports for various outputs (Telegram, Discord, console)."""
+    """Formats reports for various outputs (console)."""
 
     @staticmethod
     def format_daily(daily: DailyReport) -> str:
-        """Format daily report for Telegram."""
+        """Format daily report."""
         emoji = "🟢" if daily.daily_pnl >= 0 else "🔴"
 
         return f"""
@@ -279,7 +279,7 @@ class ReportFormatter:
 
     @staticmethod
     def format_weekly(weekly: WeeklyReport) -> str:
-        """Format weekly report for Telegram."""
+        """Format weekly report."""
         return f"""
 📅 **Weekly Report: {weekly.week_start.strftime("%Y-%m-%d")} to {weekly.week_end.strftime("%Y-%m-%d")}**
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

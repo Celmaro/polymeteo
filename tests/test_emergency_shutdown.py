@@ -38,7 +38,6 @@ async def test_close_failure_does_not_abort_remaining_positions():
     shutdown.set_dependencies(
         order_queue=None,
         executor=executor,
-        notifier=None,
         get_balance_fn=None,
         get_positions_fn=_positions_fn(positions),
     )
@@ -60,7 +59,6 @@ async def test_balance_fetch_failure_is_reported(caplog):
     shutdown.set_dependencies(
         order_queue=None,
         executor=None,
-        notifier=None,
         get_balance_fn=broken_balance,
         get_positions_fn=None,
     )

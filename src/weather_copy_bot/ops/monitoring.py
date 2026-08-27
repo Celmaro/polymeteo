@@ -1,6 +1,9 @@
 """Monitoring Service for Live Trading.
 
-Real-time monitoring, metrics tracking, and alerting.
+Real-time monitoring, metrics tracking, and dashboard state.
+The notifier integration (Telegram/Discord) was removed in the audit cleanup;
+the service still tracks metrics, checks alert conditions in-memory, and
+exposes the dashboard but no longer pushes to any external transport.
 """
 
 from __future__ import annotations
@@ -8,14 +11,10 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
-from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-    from weather_copy_bot.ops.notifications import NotificationHandler
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -100,46 +99,32 @@ class TradingDashboard:
         }
 
     def to_status_string(self) -> str:
-        """Generate status string for Telegram notifications."""
-        # Status emoji
+        """Generate human-readable status string for logs/dashboards."""
         if self.error_count_last_hour > 10:
-            status_emoji = "🔴"
-            status_text = "CRITICAL"
+            status_text = "CRITICAL: high error rate"
         elif self.current_drawdown_pct > 0.12:
-            status_emoji = "🔴"
-            status_text = "HIGH DRAWDOWN"
+            status_text = "CRITICAL: high drawdown"
         elif self.margin_used_pct > 0.85:
-            status_emoji = "🔴"
-            status_text = "HIGH MARGIN"
+            status_text = "CRITICAL: high margin"
         elif self.error_count_last_hour > 5:
-            status_emoji = "🟡"
-            status_text = "ELEVATED ERRORS"
+            status_text = "WARNING: elevated errors"
         elif self.daily_pnl <= -25:
-            status_emoji = "🟡"
-            status_text = "LOSS LIMIT"
+            status_text = "WARNING: loss limit approached"
         else:
-            status_emoji = "🟢"
             status_text = "OPERATIONAL"
 
-        return f"""
-📊 **Polymeteo Status**: {status_emoji} {status_text}
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-💰 **Balance**: ${self.current_balance_usdc:,.2f}
-📈 **Daily P&L**: ${self.daily_pnl:+,.2f}
-📊 **Total P&L**: ${self.total_pnl:+,.2f}
-💵 **Unrealized**: ${self.unrealized_pnl:+,.2f}
-
-📋 **Positions**: {self.open_positions}/{self.max_positions}
-⏳ **Pending Orders**: {self.pending_orders}
-📉 **Drawdown**: {self.current_drawdown_pct * 100:.2f}%
-🔧 **Margin Used**: {self.margin_used_pct * 100:.1f}%
-
-⚡ **Latency P95**: {self.api_latency_p95_ms:.0f}ms
-⚠️ **Errors (1h)**: {self.error_count_last_hour}
-
-📊 **Quorum**: {self.quorum_hits}/{self.quorum_total_signals} hits
-"""
+        return (
+            f"Polymeteo Status: {status_text}\n"
+            f"  Balance: ${self.current_balance_usdc:,.2f}\n"
+            f"  Daily P&L: ${self.daily_pnl:+,.2f}\n"
+            f"  Total P&L: ${self.total_pnl:+,.2f}\n"
+            f"  Positions: {self.open_positions}/{self.max_positions}\n"
+            f"  Drawdown: {self.current_drawdown_pct * 100:.2f}%\n"
+            f"  Margin Used: {self.margin_used_pct * 100:.1f}%\n"
+            f"  P95 Latency: {self.api_latency_p95_ms:.0f}ms\n"
+            f"  Errors (1h): {self.error_count_last_hour}\n"
+            f"  Quorum: {self.quorum_hits}/{self.quorum_total_signals} hits\n"
+        )
 
 
 class MonitoringService:
@@ -148,7 +133,7 @@ class MonitoringService:
 
     Features:
     - Periodic metric collection
-    - Alert condition checking
+    - Alert condition checking (in-memory; no external transport)
     - Dashboard updates
     - Performance tracking
     """
@@ -159,20 +144,10 @@ class MonitoringService:
         update_interval_seconds: int = 30,
         alert_check_interval_seconds: int = 60,
     ):
-        """
-        Initialize Monitoring Service.
-
-        Args:
-            dashboard: TradingDashboard instance to update
-            update_interval_seconds: How often to fetch metrics
-            alert_check_interval_seconds: How often to check alerts
-        """
         self.dashboard = dashboard or TradingDashboard()
         self.update_interval = update_interval_seconds
         self.alert_interval = alert_check_interval_seconds
 
-        # Dependencies
-        self._notifier: NotificationHandler | None = None
         self._get_metrics_fn: Callable[[], Awaitable[dict]] | None = None
 
         # State
@@ -180,13 +155,14 @@ class MonitoringService:
         self._tasks: list[asyncio.Task] = []
         self._metric_history: list[MetricSnapshot] = []
         self._error_timestamps: list[datetime] = []
+        self._pending_alerts: list[dict] = []
 
         # Alert thresholds
         self._alert_thresholds = {
-            "daily_loss_warning": -25.0,  # $25
-            "daily_loss_critical": -40.0,  # $40
-            "drawdown_warning": 0.10,  # 10%
-            "drawdown_critical": 0.12,  # 12%
+            "daily_loss_warning": -25.0,
+            "daily_loss_critical": -40.0,
+            "drawdown_warning": 0.10,
+            "drawdown_critical": 0.12,
             "latency_warning_ms": 500.0,
             "latency_critical_ms": 1000.0,
             "error_rate_warning": 5,
@@ -194,18 +170,16 @@ class MonitoringService:
         }
 
         logger.info(
-            f"[MONITOR] Service initialized: "
+            "[MONITOR] Service initialized: "
             f"update_interval={self.update_interval}s, "
             f"alert_interval={self.alert_interval}s"
         )
 
     def set_dependencies(
         self,
-        notifier: NotificationHandler,
         get_metrics_fn: Callable[[], Awaitable[dict]],
     ) -> None:
-        """Set dependencies for monitoring."""
-        self._notifier = notifier
+        """Set metrics dependency. Notifier integration removed (audit N0)."""
         self._get_metrics_fn = get_metrics_fn
 
     async def start(self) -> None:
@@ -217,11 +191,9 @@ class MonitoringService:
         self._running = True
         logger.info("[MONITOR] Starting monitoring service")
 
-        # Start background tasks
         self._tasks = [
             asyncio.create_task(self._update_loop()),
             asyncio.create_task(self._alert_loop()),
-            asyncio.create_task(self._hourly_report_loop()),
         ]
 
     async def stop(self) -> None:
@@ -229,7 +201,6 @@ class MonitoringService:
         self._running = False
         logger.info("[MONITOR] Stopping monitoring service")
 
-        # Cancel tasks
         for task in self._tasks:
             task.cancel()
 
@@ -243,17 +214,10 @@ class MonitoringService:
             await asyncio.sleep(self.update_interval)
 
     async def _alert_loop(self) -> None:
-        """Check for alert conditions periodically."""
+        """Check alert conditions periodically and log the outcome."""
         while self._running:
             await self._check_alerts()
             await asyncio.sleep(self.alert_interval)
-
-    async def _hourly_report_loop(self) -> None:
-        """Send hourly status report."""
-        while self._running:
-            with suppress(asyncio.CancelledError):
-                await asyncio.sleep(3600)
-                await self._send_hourly_report()
 
     async def _fetch_and_update_metrics(self) -> None:
         """Fetch metrics and update dashboard."""
@@ -263,7 +227,6 @@ class MonitoringService:
         try:
             metrics = await self._get_metrics_fn()
 
-            # Update dashboard
             self.dashboard.current_balance_usdc = metrics.get("balance", 0)
             self.dashboard.daily_pnl = metrics.get("daily_pnl", 0)
             self.dashboard.total_pnl = metrics.get("total_pnl", 0)
@@ -271,7 +234,6 @@ class MonitoringService:
             self.dashboard.pending_orders = metrics.get("pending_orders", 0)
             self.dashboard.api_latency_p95_ms = metrics.get("latency_p95_ms", 0)
 
-            # Update drawdown
             if self.dashboard.starting_balance > 0:
                 self.dashboard.current_drawdown_pct = max(
                     0,
@@ -279,11 +241,9 @@ class MonitoringService:
                     / self.dashboard.starting_balance,
                 )
 
-            # Track errors
             self._prune_error_timestamps()
             self.dashboard.error_count_last_hour = len(self._error_timestamps)
 
-            # Record snapshot
             snapshot = MetricSnapshot(
                 metric_type=MetricType.SYSTEM,
                 name="dashboard_update",
@@ -297,92 +257,89 @@ class MonitoringService:
             self.record_error(f"metric_fetch: {e}")
 
     async def _check_alerts(self) -> None:
-        """Check alert conditions and send notifications."""
-        if not self._notifier:
-            return
+        """Check alert conditions and log any triggered alerts in-process."""
+        alerts_to_send: list[dict] = []
 
-        alerts_to_send = []
-
-        # Daily loss alerts
         if self.dashboard.daily_pnl <= self._alert_thresholds["daily_loss_critical"]:
             alerts_to_send.append(
                 {
                     "severity": "critical",
-                    "title": "🚨 CRITICAL: Daily Loss Limit",
-                    "message": f"Daily P&L: ${self.dashboard.daily_pnl:.2f}\nLimit: ${self._alert_thresholds['daily_loss_critical']:.2f}",
+                    "title": "CRITICAL: Daily Loss Limit",
+                    "message": (
+                        f"Daily P&L: ${self.dashboard.daily_pnl:.2f}\n"
+                        f"Limit: ${self._alert_thresholds['daily_loss_critical']:.2f}"
+                    ),
                 }
             )
         elif self.dashboard.daily_pnl <= self._alert_thresholds["daily_loss_warning"]:
             alerts_to_send.append(
                 {
                     "severity": "warning",
-                    "title": "⚠️ WARNING: Approaching Daily Loss Limit",
-                    "message": f"Daily P&L: ${self.dashboard.daily_pnl:.2f}\nWarning at: ${self._alert_thresholds['daily_loss_warning']:.2f}",
+                    "title": "WARNING: Approaching Daily Loss Limit",
+                    "message": (
+                        f"Daily P&L: ${self.dashboard.daily_pnl:.2f}\n"
+                        f"Warning at: ${self._alert_thresholds['daily_loss_warning']:.2f}"
+                    ),
                 }
             )
 
-        # Drawdown alerts
         if self.dashboard.current_drawdown_pct >= self._alert_thresholds["drawdown_critical"]:
             alerts_to_send.append(
                 {
                     "severity": "critical",
-                    "title": "🚨 CRITICAL: High Drawdown",
-                    "message": f"Drawdown: {self.dashboard.current_drawdown_pct * 100:.2f}%\nLimit: {self._alert_thresholds['drawdown_critical'] * 100:.1f}%",
+                    "title": "CRITICAL: High Drawdown",
+                    "message": (
+                        f"Drawdown: {self.dashboard.current_drawdown_pct * 100:.2f}%\n"
+                        f"Limit: {self._alert_thresholds['drawdown_critical'] * 100:.1f}%"
+                    ),
                 }
             )
         elif self.dashboard.current_drawdown_pct >= self._alert_thresholds["drawdown_warning"]:
             alerts_to_send.append(
                 {
                     "severity": "warning",
-                    "title": "⚠️ WARNING: Elevated Drawdown",
+                    "title": "WARNING: Elevated Drawdown",
                     "message": f"Drawdown: {self.dashboard.current_drawdown_pct * 100:.2f}%",
                 }
             )
 
-        # Latency alerts
         if self.dashboard.api_latency_p95_ms >= self._alert_thresholds["latency_critical_ms"]:
             alerts_to_send.append(
                 {
                     "severity": "critical",
-                    "title": "🚨 CRITICAL: High Latency",
+                    "title": "CRITICAL: High Latency",
                     "message": f"P95 Latency: {self.dashboard.api_latency_p95_ms:.0f}ms",
                 }
             )
 
-        # Error rate alerts
         if self.dashboard.error_count_last_hour >= self._alert_thresholds["error_rate_critical"]:
             alerts_to_send.append(
                 {
                     "severity": "critical",
-                    "title": "🚨 CRITICAL: High Error Rate",
+                    "title": "CRITICAL: High Error Rate",
                     "message": f"Errors (1h): {self.dashboard.error_count_last_hour}",
                 }
             )
 
         for alert in alerts_to_send:
-            await self._send_alert_safely(alert)
+            await self._handle_alert(alert)
 
-    async def _send_alert_safely(self, alert: dict) -> None:
-        """Send one alert without letting a delivery failure abort the batch."""
-        try:
-            await self._notifier.send_alert(
-                title=alert["title"],
-                message=alert["message"],
-                severity=alert["severity"],
-            )
-        except Exception as e:
-            logger.error(f"[MONITOR] Failed to send alert '{alert['title']}': {e}")
-
-    async def _send_hourly_report(self) -> None:
-        """Send hourly status report."""
-        if not self._notifier:
-            return
-
-        try:
-            status = self.dashboard.to_status_string()
-            await self._notifier.send_message(status)
-        except Exception as e:
-            logger.error(f"[MONITOR] Failed to send hourly report: {e}")
+    async def _handle_alert(self, alert: dict) -> None:
+        """Persist an alert internally; external transport was removed (audit N0)."""
+        self._pending_alerts.append(
+            {
+                **alert,
+                "raised_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        if len(self._pending_alerts) > 200:
+            self._pending_alerts = self._pending_alerts[-200:]
+        logger.warning(
+            "[MONITOR][%s] %s — %s",
+            alert["severity"].upper(),
+            alert["title"],
+            alert["message"],
+        )
 
     def _prune_error_timestamps(self) -> None:
         """Remove error timestamps older than 1 hour."""
@@ -398,8 +355,6 @@ class MonitoringService:
     def record_latency(self, operation: str, latency_ms: float) -> None:
         """Record operation latency."""
         if operation == "api_call":
-            # Simple rolling average for P95
-            # In production, use proper percentile tracking
             self.dashboard.api_latency_p95_ms = max(
                 self.dashboard.api_latency_p95_ms * 0.9, latency_ms
             )
@@ -419,6 +374,10 @@ class MonitoringService:
         """Get current dashboard state."""
         return self.dashboard
 
+    def get_pending_alerts(self) -> list[dict]:
+        """Return the most recent in-process alerts (max 200, newest last)."""
+        return list(self._pending_alerts)
+
     def get_stats(self) -> dict[str, Any]:
         """Get monitoring statistics."""
         return {
@@ -426,6 +385,7 @@ class MonitoringService:
             "metric_history_size": len(self._metric_history),
             "error_count_1h": len(self._error_timestamps),
             "total_errors": self.dashboard.total_errors,
+            "pending_alerts": len(self._pending_alerts),
             "dashboard": self.dashboard.to_dict(),
         }
 

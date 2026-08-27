@@ -37,6 +37,7 @@ class StrategyParams:
     max_daily_loss_usd: float = 500.0
     min_edge_bps: float = 50.0
     max_copy_latency_ms: int = 800
+    max_upstream_age_ms: int = 60_000
     base_markup: float = 0.035
     latency_decay_rate: float = 0.012
     fee_rate: float = 0.002
@@ -107,6 +108,7 @@ class CopyBacktester:
             max_daily_loss_usd=self.settings.max_daily_loss_usd,
             min_edge_bps=self.settings.min_edge_bps,
             max_copy_latency_ms=self.settings.max_copy_latency_ms,
+            max_upstream_age_ms=self.settings.max_upstream_age_ms,
         )
 
     def decide(
@@ -126,7 +128,15 @@ class CopyBacktester:
         """
         p = self.params
 
-        # Check latency
+        # Two-tier staleness gate (audit P0): upstream age first, then local
+        # latency. An hours-old upstream timestamp fails before we ever check
+        # how fast we detected it locally.
+        if signal.upstream_age_ms > p.max_upstream_age_ms:
+            return CopyDecision(
+                signal=signal,
+                should_copy=False,
+                reason=f"stale_upstream:{signal.upstream_age_ms}ms",
+            )
         if signal.latency_ms > p.max_copy_latency_ms:
             return CopyDecision(
                 signal=signal,
