@@ -15,6 +15,7 @@ sentry-sdk>=2.0.0
 aiofiles>=24.1.0
 sqlalchemy>=2.0.0
 strawberry-graphql[fastapi]>=0.220.0
+polymarket-apis>=2.3.0
 
 # Optional ML/Analytics dependencies
 # NOTE: torch is installed separately in the Dockerfile (CPU-only, ~200MB).

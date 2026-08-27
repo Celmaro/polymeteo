@@ -37,6 +37,7 @@ dependencies = [
   "aiofiles>=24.1.0",
   "sqlalchemy>=2.0.0",
   "strawberry-graphql[fastapi]>=0.220.0",
+  "polymarket-apis>=2.3.0",
   # ML/analytics stack; Dockerfile pins the CPU-only torch build
   "torch>=2.4.0",
   "sentence-transformers>=2.7.0",
