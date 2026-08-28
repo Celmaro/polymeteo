@@ -440,7 +440,7 @@ class PolymarketClient:
                     observations.append(
                         {
                             "wallet": wallet,
-                            "timestamp": float(item_dict.get("timestamp") or 0.0),
+                            "timestamp": self._to_timestamp(item_dict.get("timestamp")),
                             "size_usd": size_usd,
                             "market_slug": str(item_dict.get("slug") or slug),
                             "side": "BUY"
@@ -459,6 +459,20 @@ class PolymarketClient:
             )
 
         return observations
+
+    def _to_timestamp(self, value: Any) -> float:
+        if value is None:
+            return 0.0
+        if isinstance(value, datetime):
+            return value.timestamp()
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            try:
+                return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+            except (ValueError, OSError):
+                return 0.0
+        return 0.0
 
     async def place_order(
         self,
