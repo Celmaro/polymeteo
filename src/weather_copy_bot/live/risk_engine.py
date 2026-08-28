@@ -26,7 +26,7 @@ class RiskLimits:
     # Per-trade limits
     min_trade_size_usd: float = 5.0
     max_trade_size_usd: float = 100.0
-    max_trades_per_day: int = 50
+    max_trades_per_day: int = 100
 
     # Latency limits
     max_latency_ms: int = 800

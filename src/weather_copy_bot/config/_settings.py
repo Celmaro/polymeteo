@@ -29,13 +29,13 @@ class Settings(BaseSettings):
     copy_ratio: float = 0.25
     max_position_usd: float = 250.0
     max_daily_loss_usd: float = 500.0
-    min_edge_bps: float = 50.0
+    min_edge_bps: float = 40.0
     # Two-tier latency gate (audit P0): ``max_upstream_age_ms`` bounds the age of
     # the upstream event we received (data staleness), while ``max_copy_latency_ms``
     # bounds only the local processing lag between detect and decision. A fill
     # whose upstream timestamp is hours old fails the upstream-age gate even if
     # we detected it within 50 ms locally.
-    max_upstream_age_ms: int = 60_000
+    max_upstream_age_ms: int = 600_000
     max_copy_latency_ms: int = 800
     dry_run: bool = True
 

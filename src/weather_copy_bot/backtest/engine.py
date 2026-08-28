@@ -35,9 +35,9 @@ class StrategyParams:
     copy_ratio: float = 0.25
     max_position_usd: float = 250.0
     max_daily_loss_usd: float = 500.0
-    min_edge_bps: float = 50.0
+    min_edge_bps: float = 40.0
     max_copy_latency_ms: int = 800
-    max_upstream_age_ms: int = 60_000
+    max_upstream_age_ms: int = 600_000
     base_markup: float = 0.035
     latency_decay_rate: float = 0.012
     fee_rate: float = 0.002
