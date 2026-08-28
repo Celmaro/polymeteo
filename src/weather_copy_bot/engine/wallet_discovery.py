@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 # Discovery polls a sidecar feed on a ~30s cadence, so failures back off far
 # slower than the trading poll loop (whose cap is 5s).
-DISCOVERY_FAILURE_BACKOFF_CAP_S = 300.0
+DISCOVERY_FAILURE_BACKOFF_CAP_S = None
 
 # How many addresses to surface in the ``promoted`` log line. The full list
 # can be 90+ wallets after a successful cycle; dumping every address makes a
@@ -34,9 +34,9 @@ DISCOVERY_FAILURE_BACKOFF_CAP_S = 300.0
 _PROMOTED_LOG_SAMPLE = 3
 
 
-def _backoff_delay(failures: int, base_interval_s: float, cap_s: float) -> float:
+def _backoff_delay(failures: int, base_interval_s: float, cap_s: float | None) -> float:
     doubled = base_interval_s * (2 ** min(max(failures - 1, 0), 4))
-    return min(doubled, cap_s)
+    return min(doubled, cap_s) if cap_s is not None else doubled
 
 
 def _short_addr(addr: str) -> str:
