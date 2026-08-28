@@ -41,7 +41,7 @@ CITIES = [
 WEATHER_TYPES = [
     ("highest-temperature", "Highest temperature in {}?", "temperature"),
     ("will-it-rain", "Will it rain in {}?", "rain"),
-    ("hurricane-category", "Hurricane {} on {}?", "hurricane"),
+    ("hurricane-category", "Hurricane in {}?", "hurricane"),
     ("daily-snowfall", "Daily snowfall in {}?", "snow"),
     ("severe-thunderstorm", "Severe thunderstorm in {}?", "storm"),
     ("tornado-risk", "Tornado risk in {}?", "tornado"),

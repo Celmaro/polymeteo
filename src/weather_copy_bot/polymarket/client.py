@@ -20,6 +20,7 @@ from typing import Any
 
 import httpx
 import numpy as np
+from polymarket_apis import PolymarketDataClient, PolymarketGammaClient
 
 from weather_copy_bot.config import Settings, get_settings
 from weather_copy_bot.polymarket.rate_limiter import (
@@ -27,7 +28,6 @@ from weather_copy_bot.polymarket.rate_limiter import (
     get_data_bucket,
     get_gamma_bucket,
 )
-from polymarket_apis import PolymarketDataClient, PolymarketGammaClient
 
 logger = logging.getLogger(__name__)
 

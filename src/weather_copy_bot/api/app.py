@@ -31,8 +31,8 @@ from weather_copy_bot.engine import (
     QuorumEngine,
     WalletDiscovery,
 )
-from weather_copy_bot.ops.monitoring import MonitoringService
 from weather_copy_bot.ops.metrics_server import register_metrics_routes
+from weather_copy_bot.ops.monitoring import MonitoringService
 
 logging.basicConfig(
     level=logging.INFO,

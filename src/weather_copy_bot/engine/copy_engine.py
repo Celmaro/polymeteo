@@ -21,7 +21,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 from weather_copy_bot.backtest.engine import CopyBacktester
 from weather_copy_bot.config import Settings, get_settings
@@ -121,6 +121,7 @@ class CopyEngine:
         self._running = False
         self._started_at: float | None = None
         self._ws: CLOBWebSocket | None = None
+        self._ws_task: asyncio.Task[None] | None = None
         self._ws_subscriptions: set[str] = set()
         self.stats = {
             "signals_detected": 0,
@@ -368,14 +369,14 @@ class CopyEngine:
         lo = int(rank)
         hi = min(lo + 1, len(ordered) - 1)
         frac = rank - lo
-        return int(round(ordered[lo] * (1 - frac) + ordered[hi] * frac))
+        return round(ordered[lo] * (1 - frac) + ordered[hi] * frac)
 
     # Stable bucket keys for the skip-reason histogram. The raw reason strings
     # carry variable suffixes (e.g. ``stale_signal:850ms``,
     # ``risk_rejected:max_trade_size_usd``); folding them into known prefixes
     # keeps the histogram readable and bounded so the dashboard never explodes
     # into per-fill reason keys.
-    _SKIP_REASON_BUCKETS: dict[str, str] = {
+    _SKIP_REASON_BUCKETS: ClassVar[dict[str, str]] = {
         "stale_signal": "stale",
         "stale_upstream": "stale",
         "stale": "stale",
@@ -510,7 +511,7 @@ class CopyEngine:
     async def _execute_queued_order(self, order: Order) -> bool:
         """Place one order pulled off the queue (OrderQueue.start executor)."""
         try:
-            result = await self.client.place_order(
+            await self.client.place_order(
                 token_id=order.token_id,
                 side=order.side,
                 price=order.price,
@@ -578,10 +579,7 @@ class CopyEngine:
             # semantic (local processing) stays meaningful even when upstream
             # timestamps are absent.
             upstream_age_ms = int((now - target_filled).total_seconds() * 1000)
-            if event.get("demo"):
-                latency_ms = int(event.get("latency_ms", 420))
-            else:
-                latency_ms = 0
+            latency_ms = int(event.get("latency_ms", 420)) if event.get("demo") else 0
             signal = TradeSignal(
                 signal_id=str(uuid.uuid4()),
                 target_wallet=event["wallet"],
@@ -900,13 +898,13 @@ class CopyEngine:
             self.quorum is not None
             and len(wallets) == 1
             and self.settings.single_source_mode
+            and self.quorum.min_quorum_count != 1
         ):
-            if self.quorum.min_quorum_count != 1:
-                logger.info(
-                    "single_source_mode: quorum min lowered %s -> 1 (one wallet configured)",
-                    self.quorum.min_quorum_count,
-                )
-                self.quorum.min_quorum_count = 1
+            logger.info(
+                "single_source_mode: quorum min lowered %s -> 1 (one wallet configured)",
+                self.quorum.min_quorum_count,
+            )
+            self.quorum.min_quorum_count = 1
 
         self._ws = CLOBWebSocket(on_trade=self._on_ws_trade)
         try:
@@ -917,7 +915,7 @@ class CopyEngine:
             self._ws = None
 
         if self._ws is not None:
-            asyncio.create_task(self._ws.run())
+            self._ws_task = asyncio.create_task(self._ws.run())
             try:
                 markets = await self.client.fetch_weather_markets()
                 slugs = [m.get("slug") or m.get("condition_id", "") for m in markets]

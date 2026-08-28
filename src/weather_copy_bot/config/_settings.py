@@ -39,7 +39,7 @@ class Settings(BaseSettings):
     max_copy_latency_ms: int = 800
     dry_run: bool = True
 
-    poll_interval_ms: int = 100
+    poll_interval_ms: int = 250
     market_filter: str = "weather"
     paper_starting_balance: float = 10_000.0
 

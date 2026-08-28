@@ -12,6 +12,8 @@ from weather_copy_bot.engine.wallet_discovery import (
     WalletDiscovery,
 )
 from weather_copy_bot.polymarket.client import PolymarketClient
+from polymarket_apis.clients.data_client import PolymarketDataClient
+from polymarket_apis.clients.gamma_client import PolymarketGammaClient
 
 DEMO_WALLET = "0x7a21c4e8b9f0d3a6e1c58294f0ab73d6e8c91f22"
 
@@ -44,9 +46,14 @@ def _discovery_settings(**overrides) -> Settings:
 
 
 def _trade_item(wallet: str, shares: float, price: float, ts: int, side: str = "BUY") -> dict:
-    """Data-api /trades row: USD notional is derived as size * price."""
+    """Data-api /trades row: USD notional is derived as size * price.
+
+    Production code calls ``item.model_dump()`` which emits snake_case keys,
+    so this fixture uses ``proxy_wallet`` (not ``proxyWallet``) to mirror the
+    dumped shape and avoid Pydantic validation in the test transport.
+    """
     return {
-        "proxyWallet": wallet,
+        "proxy_wallet": wallet,
         "side": side,
         "size": shares,
         "price": price,
@@ -66,7 +73,13 @@ def _activity_event(wallet: str, size: float, ts: float, slug: str = "m1") -> di
 
 
 def _search_events() -> dict:
-    """Gamma public-search payload with one live and one closed weather market."""
+    """Gamma public-search payload (post-model_dump snake_case keys).
+
+    ``PolymarketGammaClient.search`` returns ``Event`` models; the production
+    code calls ``event.model_dump()`` which emits snake_case keys, so the
+    resolver reads ``condition_id`` (not ``conditionId``). The fixtures
+    therefore mirror the dumped shape rather than the raw API response.
+    """
     return {
         "events": [
             {
@@ -74,14 +87,14 @@ def _search_events() -> dict:
                 "title": "Highest temperature in New York?",
                 "markets": [
                     {
-                        "conditionId": "0xcond1",
+                        "condition_id": "0xcond1",
                         "slug": "highest-temperature-in-new-york",
                         "active": True,
                         "closed": False,
                     },
                     {
                         # Closed -> resolver must skip it.
-                        "conditionId": "0xclosed",
+                        "condition_id": "0xclosed",
                         "slug": "resolved-temperature-market",
                         "active": False,
                         "closed": True,
@@ -97,13 +110,125 @@ class TestDiscoverWeatherWalletsHttp:
 
     @staticmethod
     def _install_transport(monkeypatch, handler) -> PolymarketClient:
-        real_cls = httpx.AsyncClient
+        """Patch PolymarketGammaClient.search/get_markets and
+        PolymarketDataClient.get_trades to invoke ``handler`` directly,
+        bypassing the polymarket-apis Pydantic validation that would otherwise
+        reject the lightweight test fixtures.
 
-        def factory(*args, **kwargs):
-            kwargs["transport"] = httpx.MockTransport(handler)
-            return real_cls(*args, **kwargs)
+        Each fake function constructs an ``httpx.Request`` that mirrors the
+        URL + params the production code would emit, hands it to the test
+        handler, and then shapes the JSON response into duck-typed objects
+        (``_FakeEvent`` / ``_FakeTrade``) that expose the same
+        ``model_dump()`` contract Pydantic models use, so the production
+        resolver code reads them transparently.
+        """
 
-        monkeypatch.setattr(httpx, "AsyncClient", factory)
+        class _FakeEvent:
+            def __init__(self, data: dict) -> None:
+                self._data = data
+
+            def model_dump(self) -> dict:
+                return self._data
+
+        class _FakeSearchResult:
+            def __init__(self, data: dict) -> None:
+                self.events = [
+                    _FakeEvent(e) for e in (data.get("events") or [])
+                ]
+
+        class _FakeMarket:
+            def __init__(self, data: dict) -> None:
+                self._data = data
+                # Production code mixes ``getattr(m, "question", ...)`` and
+                # ``m.model_dump().get("condition_id")``; expose the raw
+                # camelCase attributes so duck-typed reads succeed without
+                # Pydantic validation.
+                for key, value in data.items():
+                    setattr(self, key, value)
+
+            def model_dump(self) -> dict:
+                return self._data
+
+        class _FakeTrade:
+            def __init__(self, data: dict) -> None:
+                self._data = data
+
+            def model_dump(self) -> dict:
+                return self._data
+
+        def _fake_search(self, query, **kwargs):
+            params: dict[str, object] = {"q": query}
+            if kwargs.get("status"):
+                params["events_status"] = kwargs["status"]
+            if kwargs.get("limit_per_type"):
+                params["limit_per_type"] = kwargs["limit_per_type"]
+            request = httpx.Request(
+                "GET",
+                self._build_url("/public-search"),
+                params=params,
+            )
+            response = handler(request)
+            if response._request is None:
+                response._request = request
+            response.raise_for_status()
+            return _FakeSearchResult(response.json())
+
+        def _fake_get_markets(self, **kwargs):
+            request = httpx.Request(
+                "GET",
+                self._build_url("/markets"),
+                params=kwargs,
+            )
+            response = handler(request)
+            if response._request is None:
+                response._request = request
+            response.raise_for_status()
+            return [_FakeMarket(m) for m in (response.json() or [])]
+
+        def _fake_get_trades(
+            self,
+            limit=100,
+            offset=0,
+            taker_only=True,
+            filter_type=None,
+            filter_amount=None,
+            condition_id=None,
+            event_id=None,
+            user=None,
+            side=None,
+            **_,
+        ):
+            params: dict[str, object] = {
+                "limit": min(limit, 500),
+                "offset": offset,
+                "takerOnly": taker_only,
+            }
+            if isinstance(condition_id, str):
+                params["market"] = condition_id
+            elif isinstance(condition_id, list):
+                params["market"] = ",".join(condition_id)
+            if isinstance(event_id, str):
+                params["eventId"] = event_id
+            elif isinstance(event_id, int):
+                params["eventId"] = str(event_id)
+            if user:
+                params["user"] = user
+            if side:
+                params["side"] = side
+            request = httpx.Request(
+                "GET",
+                self._build_url("/trades"),
+                params=params,
+            )
+            response = handler(request)
+            if response._request is None:
+                response._request = request
+            response.raise_for_status()
+            return [_FakeTrade(t) for t in (response.json() or [])]
+
+        monkeypatch.setattr(PolymarketGammaClient, "search", _fake_search)
+        monkeypatch.setattr(PolymarketGammaClient, "get_markets", _fake_get_markets)
+        monkeypatch.setattr(PolymarketDataClient, "get_trades", _fake_get_trades)
         return PolymarketClient()
 
     async def test_search_supplies_condition_ids_and_parses_observations(self, monkeypatch):

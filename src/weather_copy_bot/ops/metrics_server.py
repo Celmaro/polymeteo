@@ -7,8 +7,6 @@ dashboards for latency, throughput, upstream throttling, and risk metrics.
 from __future__ import annotations
 
 import logging
-import os
-import time
 from datetime import datetime, timezone
 from typing import Any
 
