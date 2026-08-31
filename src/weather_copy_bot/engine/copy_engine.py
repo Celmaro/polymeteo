@@ -167,6 +167,7 @@ class CopyEngine:
             "live_orders_throttled": 0,
             "dry_run": True,
             "upstream_429_rejections": 0,
+            "upstream_429_by_endpoint": {},
             # Audit P4: 5-minute rolling count of upstream 429s. The monotonic
             # ``upstream_429_rejections`` lifetime counter is preserved for
             # post-mortem, while this windowed value tells operators whether
@@ -311,6 +312,8 @@ class CopyEngine:
         STATS log so the operator sees current vs lifetime throttle pressure.
         """
         self.stats["upstream_429_rejections"] += 1
+        by_endpoint = self.stats.setdefault("upstream_429_by_endpoint", {})
+        by_endpoint[host] = by_endpoint.get(host, 0) + 1
         self.stats["signals_by_reason"].setdefault("upstream_429", 0)
         self.stats["signals_by_reason"]["upstream_429"] += 1
         self._upstream_429_ts.append(time.time())

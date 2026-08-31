@@ -40,6 +40,7 @@ risk_rejections = Counter(
 upstream_429_total = Counter(
     "polymeteo_upstream_429_total",
     "Total upstream 429 (rate limit) responses from Polymarket",
+    labelnames=("endpoint",),
 )
 live_orders_filled = Counter(
     "polymeteo_live_orders_filled_total",
@@ -102,6 +103,12 @@ local_latency_ms = Histogram(
     "Local detect-to-decision latency in milliseconds",
     buckets=(1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500),
 )
+clob_latency_seconds = Histogram(
+    "polymeteo_clob_latency_seconds",
+    "CLOB API request latency in seconds",
+    labelnames=("endpoint",),
+    buckets=(0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10),
+)
 
 skip_reason_counter: dict[str, Counter] = {}
 
@@ -120,9 +127,10 @@ def _engine_stats_to_metrics(stats: dict[str, Any]) -> None:
     signals_copied.inc(max(stats.get("copied", 0) - signals_copied._value.get(), 0))
     signals_skipped.inc(max(stats.get("skipped", 0) - signals_skipped._value.get(), 0))
     risk_rejections.inc(max(stats.get("risk_rejections", 0) - risk_rejections._value.get(), 0))
-    upstream_429_total.inc(
-        max(stats.get("upstream_429_rejections", 0) - upstream_429_total._value.get(), 0)
-    )
+    by_endpoint: dict[str, int] = stats.get("upstream_429_by_endpoint", {})
+    for endpoint, count in by_endpoint.items():
+        child = upstream_429_total.labels(endpoint=endpoint)
+        child.inc(max(count - child._value.get(), 0))
     live_orders_filled.inc(
         max(stats.get("live_orders_filled", 0) - live_orders_filled._value.get(), 0)
     )

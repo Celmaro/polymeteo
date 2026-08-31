@@ -17,8 +17,9 @@ import asyncio
 import inspect
 import json
 import logging
+import time
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Awaitable
 
 import httpx
 import numpy as np
@@ -82,6 +83,20 @@ class PolymarketClient:
         bucket.record_429(retry_after)
         return retry_after
 
+    async def _timed(self, endpoint: str, coro: Awaitable[Any]) -> Any:
+        start = time.perf_counter()
+        try:
+            return await coro
+        finally:
+            try:
+                from weather_copy_bot.ops.metrics_server import clob_latency_seconds
+            except Exception:
+                clob_latency_seconds = None
+            if clob_latency_seconds is not None:
+                clob_latency_seconds.labels(endpoint=endpoint).observe(
+                    time.perf_counter() - start
+                )
+
     def default_demo_wallets(self) -> list[str]:
         return [
             "0x7a21c4e8b9f0d3a6e1c58294f0ab73d6e8c91f22",
@@ -97,12 +112,15 @@ class PolymarketClient:
         page_size = max(limit, 100)
         collected: list[Any] = []
         for page in range(max_pages):
-            batch = await asyncio.to_thread(
-                self._gamma.get_markets,
-                active=True,
-                closed=False,
-                limit=page_size,
-                offset=page * page_size,
+            batch = await self._timed(
+                self.settings.gamma_host,
+                asyncio.to_thread(
+                    self._gamma.get_markets,
+                    active=True,
+                    closed=False,
+                    limit=page_size,
+                    offset=page * page_size,
+                ),
             )
             if not batch:
                 break
@@ -174,10 +192,13 @@ class PolymarketClient:
             nonlocal network_unavailable
             await bucket.acquire()
             try:
-                activities = await asyncio.to_thread(
-                    self._data.get_activity,
-                    user=wallet,
-                    limit=20,
+                activities = await self._timed(
+                    self.settings.data_api_host,
+                    asyncio.to_thread(
+                        self._data.get_activity,
+                        user=wallet,
+                        limit=20,
+                    ),
                 )
                 if activities is None:
                     return []
@@ -320,11 +341,14 @@ class PolymarketClient:
         async def _search_keyword(keyword: str) -> list[tuple[str, str]]:
             await bucket.acquire()
             try:
-                result = await asyncio.to_thread(
-                    self._gamma.search,
-                    query=keyword,
-                    status="active",
-                    limit_per_type=10,
+                result = await self._timed(
+                    self.settings.gamma_host,
+                    asyncio.to_thread(
+                        self._gamma.search,
+                        query=keyword,
+                        status="active",
+                        limit_per_type=10,
+                    ),
                 )
                 if result is None:
                     return []
@@ -420,12 +444,15 @@ class PolymarketClient:
                 try:
                     trade_items: list = []
                     for page in range(5):
-                        trades = await asyncio.to_thread(
-                            self._data.get_trades,
-                            condition_id=condition_id,
-                            taker_only=False,
-                            limit=trades_per_market,
-                            offset=page * trades_per_market,
+                        trades = await self._timed(
+                            self.settings.data_api_host,
+                            asyncio.to_thread(
+                                self._data.get_trades,
+                                condition_id=condition_id,
+                                taker_only=False,
+                                limit=trades_per_market,
+                                offset=page * trades_per_market,
+                            ),
                         )
                         if not trades:
                             break
@@ -519,9 +546,12 @@ class PolymarketClient:
                 )
                 await bucket.acquire()
                 try:
-                    event = await asyncio.to_thread(
-                        self._gamma.get_event_by_slug,
-                        slug,
+                    event = await self._timed(
+                        self.settings.gamma_host,
+                        asyncio.to_thread(
+                            self._gamma.get_event_by_slug,
+                            slug,
+                        ),
                     )
                 except Exception as exc:
                     logger.debug("temperature event %s unavailable (%s)", slug, exc)
