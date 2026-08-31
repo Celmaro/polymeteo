@@ -36,6 +36,7 @@ from weather_copy_bot.polymarket.client import PolymarketClient
 from weather_copy_bot.polymarket.ws_client import CLOBWebSocket, TradeUpdate
 
 if TYPE_CHECKING:
+    from weather_copy_bot.db.manager import DatabaseManager
     from weather_copy_bot.ops.monitoring import MonitoringService
 
 logger = logging.getLogger(__name__)
@@ -83,12 +84,24 @@ class CopyEngine:
         target_provider: MergedTargetProvider | None = None,
         quorum: QuorumEngine | None = None,
         monitor: MonitoringService | None = None,
+        db_manager: "DatabaseManager | None" = None,
+        mode: str | None = None,
     ):
         self.settings = settings or get_settings()
         self.client = client or PolymarketClient(self.settings)
         self.policy = CopyBacktester(self.settings)
         self.paper = PaperTrader(self.settings, policy=self.policy)
-        self.order_queue = OrderQueue()
+        # Forward the WAL configuration to OrderQueue so every state
+        # transition is journaled when a db_manager is provided.
+        self.db_manager = db_manager
+        # Use ``_order_journal_mode`` (underscored) to avoid colliding with
+        # the ``mode`` property exposed by CopyEngine which derives its
+        # value from settings live_trading_enabled.
+        self._order_journal_mode = mode or self.mode
+        self.order_queue = OrderQueue(
+            db_manager=self.db_manager,
+            mode=self._order_journal_mode,
+        )
         self.risk: RiskEngine | None = risk_engine or RiskEngine()
         self.on_decision = on_decision
         # When set, the polling rotation comes from the provider each cycle

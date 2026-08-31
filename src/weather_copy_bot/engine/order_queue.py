@@ -1,6 +1,11 @@
 """Order Queue with Deduplication for Concurrent Execution.
 
 Prevents duplicate orders when multiple signals trigger the same market.
+
+When ``db_manager`` is provided, every state transition is journaled to
+``order_records`` via ``OrderRepository.upsert_from_queue``. The write is
+fire-and-forget so a degraded DB can never block the live trading path;
+flushed task handles are awaited on ``stop()`` so shutdown is clean.
 """
 
 import asyncio
@@ -9,8 +14,13 @@ import time
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
+from typing import TYPE_CHECKING
 from uuid import uuid4
+
+if TYPE_CHECKING:
+    from weather_copy_bot.db.manager import DatabaseManager
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +88,8 @@ class OrderQueue:
         dedup_window_seconds: int = 60,
         max_retries: int = 3,
         rate_limit_per_second: int = 5,
+        db_manager: "DatabaseManager | None" = None,
+        mode: str = "paper",
     ):
         """
         Initialize OrderQueue.
@@ -87,11 +99,17 @@ class OrderQueue:
             dedup_window_seconds: Window for deduplication
             max_retries: Max retry attempts
             rate_limit_per_second: Max orders per second
+            db_manager: Optional database manager for WAL persistence.
+                When ``None`` the queue runs in memory-only mode (no
+                journal; identical behavior to the previous release).
+            mode: Mode tag persisted with each row (backtest / paper / live).
         """
         self.max_queue_size = max_queue_size
         self.dedup_window = dedup_window_seconds
         self.max_retries = max_retries
         self.rate_limit = rate_limit_per_second
+        self.db_manager = db_manager
+        self.mode = mode
 
         # Main queue
         self._queue: asyncio.PriorityQueue = asyncio.PriorityQueue(maxsize=max_queue_size)
@@ -119,7 +137,12 @@ class OrderQueue:
             "orders_failed": 0,
             "duplicates_rejected": 0,
             "rate_limited": 0,
+            "wal_flush_failures": 0,
         }
+
+        # In-flight WAL flush tasks (kept alive so they're not GC'd).
+        self._wal_tasks: set[asyncio.Task] = set()
+        self._wal_warned_unavailable = False
 
         # Background tasks
         self._cleanup_task: asyncio.Task | None = None
@@ -165,6 +188,76 @@ class OrderQueue:
 
         self._submit_count += 1
         return True
+
+    @staticmethod
+    def _ts_to_dt(epoch: float | None) -> datetime | None:
+        """Convert a ``time.time()`` float to a UTC ``datetime``.
+
+        The in-memory Order dataclass stores epoch floats; the journal
+        schema uses DateTime. ``None`` passes through unchanged.
+        """
+        if epoch is None:
+            return None
+        return datetime.fromtimestamp(epoch, tz=timezone.utc)
+
+    def _persist_state(self, order: Order) -> None:
+        """Schedule a fire-and-forget WAL write for this order.
+
+        Returns immediately if no db_manager is configured. Failures are
+        logged inside the spawned task; this method never raises so the
+        live trading path is never blocked by a degraded DB.
+        """
+        if self.db_manager is None:
+            if not self._wal_warned_unavailable:
+                logger.debug("[Queue] WAL disabled (no db_manager); order "
+                             "transitions are not journaled")
+                self._wal_warned_unavailable = True
+            return
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            logger.warning("[Queue] WAL flush skipped (no running loop): %s",
+                           order.order_id[:8])
+            return
+
+        task = loop.create_task(self._write_state_async(order))
+        self._wal_tasks.add(task)
+        task.add_done_callback(self._wal_tasks.discard)
+
+    async def _write_state_async(self, order: Order) -> None:
+        """Open a fresh session, upsert the order, close the session."""
+        if self.db_manager is None:
+            return
+        try:
+            from weather_copy_bot.db.repositories import OrderRepository
+
+            with self.db_manager.session() as session:
+                repo = OrderRepository(session)
+                repo.upsert_from_queue(
+                    order_id=order.order_id,
+                    token_id=order.token_id,
+                    side=order.side,
+                    size_usd=order.size_usd,
+                    price=order.price,
+                    state=order.state.value,
+                    retries=order.retries,
+                    max_retries=order.max_retries,
+                    fill_amount=order.fill_amount,
+                    created_at=self._ts_to_dt(order.created_at),
+                    submitted_at=self._ts_to_dt(order.submitted_at),
+                    filled_at=self._ts_to_dt(order.filled_at),
+                    error=order.error,
+                    mode=self.mode,
+                    metadata_json=order.metadata or None,
+                )
+        except Exception as exc:
+            self._stats["wal_flush_failures"] += 1
+            logger.warning(
+                "[Queue] WAL flush failed for order %s: %s",
+                order.order_id[:8],
+                exc,
+            )
 
     async def enqueue(
         self,
@@ -213,6 +306,8 @@ class OrderQueue:
                 f"(token={order.token_id[:16]}...)"
             )
 
+            self._persist_state(order)
+
             return order.order_id
 
         except asyncio.QueueFull:
@@ -248,6 +343,8 @@ class OrderQueue:
         self._stats["orders_submitted"] += 1
         logger.info(f"[Queue] Order submitted: {order_id[:8]}...")
 
+        self._persist_state(order)
+
         return True
 
     async def mark_filled(self, order_id: str, fill_amount: float | None = None) -> bool:
@@ -265,6 +362,8 @@ class OrderQueue:
         self._stats["orders_filled"] += 1
         logger.info(f"[Queue] Order filled: {order_id[:8]}... (amount={order.fill_amount})")
 
+        self._persist_state(order)
+
         return True
 
     async def mark_cancelled(self, order_id: str, reason: str = "") -> bool:
@@ -281,6 +380,8 @@ class OrderQueue:
         self._stats["orders_cancelled"] += 1
         logger.warning(f"[Queue] Order cancelled: {order_id[:8]}... ({reason})")
 
+        self._persist_state(order)
+
         return True
 
     async def mark_rejected(self, order_id: str, reason: str = "") -> bool:
@@ -296,6 +397,7 @@ class OrderQueue:
             order.state = OrderState.REJECTED
             self._stats["orders_rejected"] += 1
             logger.error(f"[Queue] Order rejected after {order.retries} retries: {order_id[:8]}...")
+            self._persist_state(order)
             return False
 
         # Reset to pending for retry
@@ -304,6 +406,7 @@ class OrderQueue:
             f"[Queue] Order retry {order.retries}/{order.max_retries}: {order_id[:8]}..."
         )
 
+        self._persist_state(order)
         return True
 
     async def mark_failed(self, order_id: str, error: str) -> bool:
@@ -317,6 +420,8 @@ class OrderQueue:
 
         self._stats["orders_failed"] += 1
         logger.error(f"[Queue] Order failed: {order_id[:8]}... ({error})")
+
+        self._persist_state(order)
 
         return True
 
@@ -377,6 +482,11 @@ class OrderQueue:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Drain in-flight WAL writes so the journal reflects the last
+        # state transition before the process exits.
+        if self._wal_tasks:
+            await asyncio.gather(*self._wal_tasks, return_exceptions=True)
 
         logger.info("[Queue] Order queue processor stopped")
 

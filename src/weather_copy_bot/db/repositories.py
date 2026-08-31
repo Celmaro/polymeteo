@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from weather_copy_bot.db.models import (
     Decision,
     Fill,
+    OrderRecord,
     Signal,
     Strategy,
     StrategyRun,
@@ -263,5 +264,139 @@ class TickRepository:
             .where(Tick.run_id == run_id, Tick.market_slug == market_slug)
             .order_by(Tick.timestamp)
         )
+        result = self.session.execute(query)
+        return list(result.scalars().all())
+
+
+class OrderRepository:
+    """Repository for the OrderRecord write-ahead log.
+
+    The OrderQueue calls into this repository to durably journal every state
+    transition. Writes are best-effort: a failed flush is logged but does
+    not raise back into the queue so a degraded DB never blocks live
+    trading.
+    """
+
+    def __init__(self, session: Session):
+        self.session = session
+
+    def create(self, **kwargs) -> OrderRecord:
+        """Create a new OrderRecord row."""
+        record = OrderRecord(**kwargs)
+        self.session.add(record)
+        self.session.flush()
+        return record
+
+    def get_by_order_id(self, order_id: str) -> OrderRecord | None:
+        query = select(OrderRecord).where(OrderRecord.order_id == order_id)
+        result = self.session.execute(query)
+        return result.scalar_one_or_none()
+
+    def update_state(
+        self,
+        order_id: str,
+        new_state: str,
+        *,
+        retries: int | None = None,
+        fill_amount: float | None = None,
+        submitted_at: datetime | None = None,
+        filled_at: datetime | None = None,
+        error: str | None = None,
+        record_changes: bool = True,
+    ) -> OrderRecord | None:
+        """Update an order's state and any auxiliary columns.
+
+        Returns the updated row, or None if the order_id is unknown. The
+        caller is responsible for committing the session.
+        """
+        record = self.get_by_order_id(order_id)
+        if record is None:
+            return None
+        record.state = new_state
+        if retries is not None:
+            record.retries = retries
+        if fill_amount is not None:
+            record.fill_amount = fill_amount
+        if submitted_at is not None:
+            record.submitted_at = submitted_at
+        if filled_at is not None:
+            record.filled_at = filled_at
+        if error is not None:
+            record.error = error
+        if record_changes:
+            self.session.flush()
+        return record
+
+    def upsert_from_queue(
+        self,
+        *,
+        order_id: str,
+        token_id: str,
+        side: str,
+        size_usd: float,
+        price: float,
+        state: str,
+        retries: int,
+        max_retries: int,
+        fill_amount: float,
+        created_at: datetime,
+        submitted_at: datetime | None,
+        filled_at: datetime | None,
+        error: str | None,
+        mode: str,
+        metadata_json: dict | None,
+    ) -> OrderRecord:
+        """Insert-or-update an order record from the in-memory queue.
+
+        Used by the queue's state-transition hooks: the first call for an
+        order_id performs an insert, subsequent calls perform an update on
+        the matching row.
+        """
+        record = self.get_by_order_id(order_id)
+        if record is None:
+            record = OrderRecord(
+                order_id=order_id,
+                token_id=token_id,
+                side=side,
+                size_usd=size_usd,
+                price=price,
+                state=state,
+                retries=retries,
+                max_retries=max_retries,
+                fill_amount=fill_amount,
+                created_at=created_at,
+                submitted_at=submitted_at,
+                filled_at=filled_at,
+                error=error,
+                mode=mode,
+                metadata_json=metadata_json,
+            )
+            self.session.add(record)
+        else:
+            record.state = state
+            record.retries = retries
+            record.fill_amount = fill_amount
+            record.submitted_at = submitted_at
+            record.filled_at = filled_at
+            record.error = error
+        self.session.flush()
+        return record
+
+    def get_by_state(self, state: str) -> list[OrderRecord]:
+        query = (
+            select(OrderRecord)
+            .where(OrderRecord.state == state)
+            .order_by(OrderRecord.created_at)
+        )
+        result = self.session.execute(query)
+        return list(result.scalars().all())
+
+    def get_active(self, mode: str | None = None) -> list[OrderRecord]:
+        """Get all non-terminal orders (PENDING, SUBMITTED, PARTIAL)."""
+        terminal = {"filled", "cancelled", "rejected", "failed"}
+        query = select(OrderRecord).where(OrderRecord.state.notin_(terminal))
+        if mode is not None:
+            query = query.where(OrderRecord.mode == mode)
+        query = query.order_by(OrderRecord.created_at)
         result = self.session.execute(query)
         return list(result.scalars().all())
