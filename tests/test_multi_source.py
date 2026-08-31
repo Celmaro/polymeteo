@@ -154,6 +154,12 @@ class TestFusionFallbackBehavior:
             await fusion.fetch_weather_markets(limit=10)
             assert fusion.last_source == DataSource.GAMMA
 
+    @pytest.mark.asyncio
+    async def test_subgraph_fallback_returns_empty_without_api_key(self, fusion):
+        """Subgraph fallback should return empty list when no API key is configured."""
+        result = await fusion._fetch_from_subgraph(10)
+        assert result == []
+
 
 class TestMarketFiltering:
     """Test market filtering logic."""

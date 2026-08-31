@@ -121,6 +121,12 @@ class MultiSourceDataFusion:
     async def _fetch_from_subgraph(self, limit: int) -> list[dict]:
         """Fetch markets from The Graph subgraph.
 
+        Uses the The Graph Network gateway (the legacy api.thegraph.com hosted
+        endpoints are deprecated and the Goldsky Polymarket subgraphs are
+        paused). Requires ``thegraph_api_key`` in settings; when absent this
+        returns an empty list so the caller falls through to the GraphQL
+        fallback instead of erroring.
+
         Args:
             limit: Maximum number of markets to return.
 
@@ -130,8 +136,18 @@ class MultiSourceDataFusion:
         Raises:
             Exception: If the subgraph query fails.
         """
+        api_key = self.settings.thegraph_api_key
+        if not api_key:
+            logger.warning(
+                "Subgraph fallback skipped: THEGRAPH_API_KEY not configured"
+            )
+            return []
         client = await PolymarketClientFactory.get_data_client()
-        url = "https://thegraph.com/explorer/subgraphs/..."
+        url = (
+            "https://gateway.thegraph.com/api/"
+            f"{api_key}/subgraphs/id/"
+            "Bx1W4S7kDVxs9gC3s2G6DS8kdNBJNVhMviCtin2DiBp"
+        )
         query = """
         query GetMarkets($limit: Int!) {
             markets(first: $limit, where: {active: true}) {

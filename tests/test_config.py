@@ -120,6 +120,14 @@ class TestHostsConfiguration:
         settings = Settings()
         assert "data-api.polymarket.com" in settings.data_api_host
 
+    def test_default_thegraph_api_key_empty(self):
+        settings = Settings()
+        assert settings.thegraph_api_key == ""
+
+    def test_thegraph_api_key_from_env(self):
+        settings = Settings(thegraph_api_key="subgraph_key_123")
+        assert settings.thegraph_api_key == "subgraph_key_123"
+
 
 class TestGetSettingsCache:
     """Test settings caching."""

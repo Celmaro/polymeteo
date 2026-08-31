@@ -25,6 +25,14 @@ class Settings(BaseSettings):
     gamma_host: str = "https://gamma-api.polymarket.com"
     data_api_host: str = "https://data-api.polymarket.com"
 
+    # Optional The Graph Network API key used only for the subgraph data
+    # fallback in MultiSourceDataFusion. Free tier is available at
+    # https://thegraph.com/studio/apikeys. When empty, the subgraph fallback
+    # logs a warning and returns no data (the GraphQL fallback still runs),
+    # so deployments never need to configure this unless they want subgraph
+    # coverage.
+    thegraph_api_key: str = ""
+
     target_wallets: list[str] = Field(default_factory=list)
     copy_ratio: float = 0.25
     max_position_usd: float = 250.0
