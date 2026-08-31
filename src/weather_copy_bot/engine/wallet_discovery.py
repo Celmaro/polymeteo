@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from weather_copy_bot.config import Settings
+from weather_copy_bot.engine.wallet_profiler import WalletProfile, WalletProfiler
 from weather_copy_bot.polymarket.client import PolymarketClient
 
 logger = logging.getLogger(__name__)
@@ -107,6 +108,9 @@ class DiscoveredWallet:
     # Distinct markets observed that were NOT weather; used for the generalist
     # "dispersion" guard that keeps crypto/politics/sports wallets out.
     non_weather_markets: set[str] = field(default_factory=set)
+    # First-party P&L enrichment from WalletProfiler (None until the profiler
+    # runs). Only consulted when a profiler gate (> 0) is configured.
+    profile: WalletProfile | None = None
 
     @property
     def weather_share(self) -> float:
@@ -162,6 +166,9 @@ class WalletDiscovery:
         self._wallets: dict[str, DiscoveredWallet] = {}
         self._last_promoted: tuple[str, ...] = ()
         self._running = False
+        self.profiler = (
+            WalletProfiler(settings, self.client) if settings.profiler_enabled else None
+        )
         self.stats: dict[str, Any] = {
             "discovery_cycles": 0,
             "observations": 0,
@@ -169,6 +176,8 @@ class WalletDiscovery:
             "consecutive_failures": 0,
             "last_error": None,
             "discovery_last_error_at": None,
+            "profiled": 0,
+            "profile_errors": 0,
         }
 
     def observe(self, events: Iterable[dict[str, Any]]) -> int:
@@ -205,8 +214,31 @@ class WalletDiscovery:
             self.stats["observations"] += accepted
         return len(touched)
 
-    def candidates(self) -> list[DiscoveredWallet]:
-        """Wallets meeting every promotion gate, highest conviction first."""
+    async def _profile_candidates(self) -> None:
+        """Enrich every activity-candidate with first-party P&L metrics.
+
+        Runs after each observe cycle when the profiler is enabled. Uses the
+        activity gate (not ``candidates()``) so a wallet that has not yet been
+        profiled is still eligible for the enrichment pass.
+        """
+        profiler = self.profiler
+        if profiler is None:
+            return
+        targets = [w.address for w in self._activity_candidates()]
+        if not targets:
+            return
+        profiles = await profiler.profile_wallets(targets)
+        for key, profile in profiles.items():
+            record = self._wallets.get(key)
+            if record is None:
+                continue
+            record.profile = profile
+            self.stats["profiled"] += 1
+            if not profile.data_available:
+                self.stats["profile_errors"] += 1
+
+    def _activity_candidates(self) -> list[DiscoveredWallet]:
+        """Wallets clearing every activity/volume gate (before profiler gates)."""
         ttl_cutoff = time.time() - self.settings.candidate_ttl_hours * 3600.0
         max_trades_day = self.settings.max_candidate_trades_per_day
         max_non_weather = self.settings.max_non_weather_markets
@@ -223,6 +255,45 @@ class WalletDiscovery:
         qualified.sort(key=lambda w: (w.volume_usd, w.trades_seen), reverse=True)
         return qualified
 
+    @staticmethod
+    def _profile_ok(
+        wallet: DiscoveredWallet,
+        min_roi_pct: float,
+        min_win_rate: float,
+        max_weekly_variance: float,
+    ) -> bool:
+        """Profiler gate: only evaluated when at least one gate is armed."""
+        if min_roi_pct <= 0 and min_win_rate <= 0 and max_weekly_variance <= 0:
+            return True
+        profile = wallet.profile
+        if profile is None or not profile.data_available:
+            # Gates are armed, but we have no verified profile: do not promote
+            # on missing data (the profiler backoff will retry later).
+            return False
+        if min_roi_pct > 0 and profile.roi_pct < min_roi_pct:
+            return False
+        if min_win_rate > 0 and profile.win_rate < min_win_rate:
+            return False
+        return max_weekly_variance <= 0 or profile.weekly_variance <= max_weekly_variance
+
+    def candidates(self) -> list[DiscoveredWallet]:
+        """Wallets meeting every promotion gate, highest conviction first.
+
+        Applies the activity/volume gates first, then the optional profiler
+        gates. A wallet with no verified profile is rejected only when a
+        profiler gate is actually configured (``profiler_min_*`` > 0).
+        """
+        return [
+            w
+            for w in self._activity_candidates()
+            if self._profile_ok(
+                w,
+                self.settings.profiler_min_roi_pct,
+                self.settings.profiler_min_win_rate,
+                self.settings.profiler_max_weekly_variance,
+            )
+        ]
+
     def promoted_wallets(self, max_targets: int | None = None) -> list[str]:
         """Addresses cleared for the polling rotation this instant.
 
@@ -238,15 +309,24 @@ class WalletDiscovery:
 
     def status(self) -> dict[str, Any]:
         """Snapshot for the /api/discovery/status endpoint."""
-        top = [
-            {
+        top = []
+        for w in self.candidates()[:5]:
+            entry: dict[str, Any] = {
                 "address": w.address,
                 "trades_seen": w.trades_seen,
                 "volume_usd": round(w.volume_usd, 2),
                 "markets": len(w.markets),
             }
-            for w in self.candidates()[:5]
-        ]
+            if w.profile is not None:
+                entry["profile"] = {
+                    "realized_pnl": round(w.profile.realized_pnl, 2),
+                    "win_rate": round(w.profile.win_rate, 4),
+                    "roi_pct": round(w.profile.roi_pct, 2),
+                    "weekly_variance": round(w.profile.weekly_variance, 2),
+                    "age_days": round(w.profile.age_days, 1),
+                    "weather_rank": w.profile.weather_rank,
+                }
+            top.append(entry)
         return {
             "enabled": True,
             **self.stats,
@@ -280,6 +360,8 @@ class WalletDiscovery:
                         "discovery cycle: zero markets/observations; skipping"
                     )
                 touched = self.observe(events)
+                if self.profiler is not None:
+                    await self._profile_candidates()
                 consecutive_failures = 0
                 self.stats["consecutive_failures"] = 0
                 self.stats["last_error"] = None

@@ -77,6 +77,23 @@ class Settings(BaseSettings):
     # generalist "dispersion" profile. 0 disables the rule (default).
     max_non_weather_markets: int = 0
 
+    # WalletProfiler (first-party P&L enrichment). When enabled, discovered
+    # candidates are enriched from Polymarket's own endpoints (closed-positions,
+    # user-pnl, WEATHER leaderboard, lb-api profit, /value) instead of a third
+    # party. The profiler never blocks promotion while its gates are disabled.
+    profiler_enabled: bool = False
+    # Reuse a profile for this many seconds before re-fetching (rate limiting).
+    profiler_cache_ttl_s: float = 3600.0
+    # How many wallets to profile per discovery cycle (burst budget).
+    profiler_max_wallets_per_cycle: int = 20
+    # Backoff applied to a wallet whose profile fetch failed, before retrying.
+    profiler_backoff_s: float = 600.0
+    # Optional promotion gates built from profiler metrics. 0 disables each.
+    # ROI is realized_pnl / invested on closed positions, expressed as a percent.
+    profiler_min_roi_pct: float = 0.0
+    profiler_min_win_rate: float = 0.0
+    profiler_max_weekly_variance: float = 0.0
+
     # Demo mode is the ONLY situation where the client returns fabricated
     # stub markets / demo trade events. Defaults to False so production never
     # silently trades on made-up data.

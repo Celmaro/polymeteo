@@ -18,8 +18,9 @@ import inspect
 import json
 import logging
 import time
+from collections.abc import Awaitable
 from datetime import datetime, timedelta, timezone
-from typing import Any, Awaitable
+from typing import Any
 
 import httpx
 import numpy as np
@@ -96,6 +97,101 @@ class PolymarketClient:
                 clob_latency_seconds.labels(endpoint=endpoint).observe(
                     time.perf_counter() - start
                 )
+
+    async def _data_call(self, fn, *args, **kwargs) -> Any:
+        """Run a PolymarketDataClient call behind the data token bucket.
+
+        Shared helper for the profiler: acquires the rate-limit budget, records
+        latency, and raises the original HTTP error so the caller can apply
+        backoff. 429 responses update the bucket and notify the observer.
+        """
+        bucket = get_data_bucket()
+        await bucket.acquire()
+        try:
+            return await self._timed(
+                self.settings.data_api_host,
+                asyncio.to_thread(fn, *args, **kwargs),
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 429:
+                retry_after = self._record_429(
+                    bucket, exc.response, self.settings.data_api_host
+                )
+                await self._notify_rate_limit(
+                    self.settings.data_api_host, retry_after
+                )
+            raise
+
+    async def fetch_closed_positions(self, wallet: str) -> list[dict[str, Any]]:
+        """Closed-position realized P&L rows for ``wallet`` (snake_case dicts)."""
+        result = await self._data_call(self._data.get_closed_positions, user=wallet)
+        return [p.model_dump() for p in (result or [])]
+
+    async def fetch_pnl_timeseries(
+        self,
+        wallet: str,
+        period: str = "all",
+        frequency: str = "1h",
+    ) -> list[dict[str, Any]]:
+        """User-pnl timeseries points (``{value, timestamp}`` dicts)."""
+        result = await self._data_call(
+            self._data.get_pnl, user=wallet, period=period, frequency=frequency
+        )
+        return [p.model_dump() for p in (result or [])]
+
+    async def fetch_user_profit(self, wallet: str) -> float:
+        """Overall profit for ``wallet`` from the lb-api metric endpoint."""
+        bucket = get_data_bucket()
+        await bucket.acquire()
+        try:
+            result = await self._timed(
+                self.settings.data_api_host,
+                asyncio.to_thread(
+                    self._data.get_user_metric,
+                    user=wallet,
+                    metric="profit",
+                    window="all",
+                ),
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 429:
+                retry_after = self._record_429(
+                    bucket, exc.response, self.settings.data_api_host
+                )
+                await self._notify_rate_limit(
+                    self.settings.data_api_host, retry_after
+                )
+            raise
+        if result is None:
+            return 0.0
+        return float(getattr(result, "amount", 0.0) or 0.0)
+
+    async def fetch_weather_rank(self, wallet: str) -> int | None:
+        """WEATHER-category leaderboard rank for ``wallet``, or ``None``."""
+        try:
+            result = await self._data_call(
+                self._data.get_leaderboard_rankings,
+                address=wallet,
+                category="WEATHER",
+                time_period="ALL",
+                limit=1,
+            )
+        except httpx.HTTPStatusError:
+            raise
+        if not result:
+            return None
+        rank = int(getattr(result[0], "rank", 0) or 0)
+        return rank if rank > 0 else None
+
+    async def fetch_position_value(self, wallet: str) -> float:
+        """Current USD value of ``wallet``'s open positions."""
+        try:
+            result = await self._data_call(self._data.get_value, user=wallet)
+        except httpx.HTTPStatusError:
+            raise
+        if result is None:
+            return 0.0
+        return float(getattr(result, "value", 0.0) or 0.0)
 
     def default_demo_wallets(self) -> list[str]:
         return [
