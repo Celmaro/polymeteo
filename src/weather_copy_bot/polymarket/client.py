@@ -14,6 +14,8 @@ of whether the request originates here or inside the library.
 from __future__ import annotations
 
 import asyncio
+import inspect
+import json
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -68,7 +70,9 @@ class PolymarketClient:
         if self._on_rate_limit is None:
             return
         try:
-            await self._on_rate_limit(host, retry_after)
+            result = self._on_rate_limit(host, retry_after)
+            if inspect.isawaitable(result):
+                await result
         except Exception as exc:
             logger.debug("rate-limit observer raised %s", exc)
 
@@ -85,18 +89,33 @@ class PolymarketClient:
             "0x91d0aa56c2e84f17b3c9e08d5a6f12b4e70c83aa",
         ]
 
+    async def _get_all_markets(
+        self,
+        limit: int = 100,
+        max_pages: int = 10,
+    ) -> list[Any]:
+        page_size = max(limit, 100)
+        collected: list[Any] = []
+        for page in range(max_pages):
+            batch = await asyncio.to_thread(
+                self._gamma.get_markets,
+                active=True,
+                closed=False,
+                limit=page_size,
+                offset=page * page_size,
+            )
+            if not batch:
+                break
+            collected.extend(batch)
+            if len(batch) < page_size:
+                break
+        return collected
+
     async def fetch_weather_markets(self, limit: int = 50) -> list[dict[str, Any]]:
         bucket = get_gamma_bucket()
         await bucket.acquire()
         try:
-            markets = await asyncio.to_thread(
-                self._gamma.get_markets,
-                active=True,
-                closed=False,
-                limit=limit,
-            )
-            if markets is None:
-                markets = []
+            markets = await self._get_all_markets(limit=limit)
             weather = [
                 m.model_dump()
                 for m in markets
@@ -111,29 +130,36 @@ class PolymarketClient:
                 )
             ]
             if weather:
+                self.last_markets_error = None
                 return weather
+            self.last_markets_error = "gamma returned no weather-matching markets"
+            logger.warning("gamma returned no weather-matching markets")
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 429:
                 retry_after = self._record_429(
                     bucket, exc.response, self.settings.gamma_host
                 )
                 await self._notify_rate_limit(self.settings.gamma_host, retry_after)
+                self.last_markets_error = f"gamma markets throttled (HTTP 429, retry_after={retry_after:.1f}s)"
                 logger.warning(
                     "gamma markets throttled (HTTP 429, retry_after=%.1fs)",
                     retry_after,
                 )
             else:
-                logger.warning(
-                    "gamma markets unavailable, using stubs: %s", exc
-                )
+                self.last_markets_error = f"gamma markets unavailable: {exc}"
+                logger.warning("gamma markets unavailable: %s", exc)
         except Exception as exc:
-            logger.warning("gamma markets unavailable, using stubs: %s", exc)
-        return self._stub_markets()
+            self.last_markets_error = f"gamma markets unavailable: {exc}"
+            logger.warning("gamma markets unavailable: %s", exc)
+        if self.settings.demo_mode:
+            return self._stub_markets()
+        return []
 
     async def fetch_target_activity(
         self,
         wallets: list[str],
         market_filter: str = "weather",
+        min_size_usd: float = 0.0,
     ) -> list[dict[str, Any]]:
         if not wallets:
             wallets = self.default_demo_wallets()
@@ -205,6 +231,15 @@ class PolymarketClient:
                     )
                 ):
                     continue
+                size_usd = float(
+                    item_dict.get("usdc_size")
+                    or item_dict.get("size")
+                    or 50
+                )
+                # Leader-side prefilter: drop sub-floor fills here so they
+                # never reach parse/quorum/risk evaluation downstream.
+                if min_size_usd > 0 and size_usd < min_size_usd:
+                    continue
                 result.append(
                     {
                         "id": item_dict.get("transaction_hash") or "",
@@ -224,11 +259,7 @@ class PolymarketClient:
                         if str(item_dict.get("side") or "BUY").upper() == "BUY"
                         else "SELL",
                         "price": float(item_dict.get("price") or 0.5),
-                        "size_usd": float(
-                            item_dict.get("usdc_size")
-                            or item_dict.get("size")
-                            or 50
-                        ),
+                        "size_usd": size_usd,
                         "token_id": str(
                             item_dict.get("asset")
                             or item_dict.get("token_id")
@@ -387,15 +418,20 @@ class PolymarketClient:
             for condition_id, slug in targets:
                 await bucket.acquire()
                 try:
-                    trades = await asyncio.to_thread(
-                        self._data.get_trades,
-                        condition_id=condition_id,
-                        taker_only=False,
-                        limit=trades_per_market,
-                    )
-                    if trades is None:
-                        trades = []
-                    trade_items: list = list(trades)
+                    trade_items: list = []
+                    for page in range(5):
+                        trades = await asyncio.to_thread(
+                            self._data.get_trades,
+                            condition_id=condition_id,
+                            taker_only=False,
+                            limit=trades_per_market,
+                            offset=page * trades_per_market,
+                        )
+                        if not trades:
+                            break
+                        trade_items.extend(trades)
+                        if len(trades) < trades_per_market:
+                            break
                 except httpx.HTTPStatusError as exc:
                     if exc.response.status_code == 429:
                         retry_after = self._record_429(
@@ -459,6 +495,105 @@ class PolymarketClient:
             )
 
         return observations
+
+    async def fetch_temperature_market_events(
+        self,
+        cities: list[str],
+        days_ahead: int = 4,
+    ) -> list[dict[str, Any]]:
+        from weather_copy_bot.analysis.city_config import CITY_CONFIG
+
+        bucket = get_gamma_bucket()
+        today = datetime.now(timezone.utc).date()
+        results: list[dict[str, Any]] = []
+
+        for city in cities:
+            city_key = str(city).lower()
+            config = CITY_CONFIG.get(city_key)
+            city_slug = config["slug"] if config is not None else city_key
+            for day_offset in range(days_ahead):
+                day = today + timedelta(days=day_offset)
+                slug = (
+                    f"highest-temperature-in-{city_slug}-on-"
+                    f"{day.strftime('%B').lower()}-{day.day}-{day.year}"
+                )
+                await bucket.acquire()
+                try:
+                    event = await asyncio.to_thread(
+                        self._gamma.get_event_by_slug,
+                        slug,
+                    )
+                except Exception as exc:
+                    logger.debug("temperature event %s unavailable (%s)", slug, exc)
+                    continue
+                if event is None:
+                    continue
+                event_dict = (
+                    event.model_dump()
+                    if hasattr(event, "model_dump")
+                    else (event if isinstance(event, dict) else {})
+                )
+                for market in event_dict.get("markets") or []:
+                    market_dict = (
+                        market.model_dump()
+                        if hasattr(market, "model_dump")
+                        else (market if isinstance(market, dict) else {})
+                    )
+                    if not self._coerce_bool(market_dict.get("accepting_orders")):
+                        continue
+                    token_ids = self._coerce_json_list(
+                        market_dict.get("clobTokenIds")
+                        or market_dict.get("clob_token_ids")
+                    )
+                    if not token_ids:
+                        continue
+                    outcomes = self._coerce_json_list(
+                        market_dict.get("outcomes")
+                    )
+                    outcome_prices = self._coerce_json_list(
+                        market_dict.get("outcomePrices")
+                        or market_dict.get("outcome_prices")
+                    )
+                    results.append(
+                        {
+                            "event_slug": str(event_dict.get("slug") or slug),
+                            "market_slug": str(market_dict.get("slug") or slug),
+                            "question": str(
+                                market_dict.get("question")
+                                or event_dict.get("title")
+                                or ""
+                            ),
+                            "city": city_key,
+                            "date": day.isoformat(),
+                            "token_ids": [str(t) for t in token_ids],
+                            "outcomes": [str(o) for o in outcomes],
+                            "outcome_prices": [str(p) for p in outcome_prices],
+                            "accepting_orders": True,
+                        }
+                    )
+        return results
+
+    @staticmethod
+    def _coerce_json_list(value: Any) -> list[Any]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+            except (json.JSONDecodeError, ValueError):
+                return []
+            return list(parsed) if isinstance(parsed, list) else []
+        if isinstance(value, (list, tuple)):
+            return list(value)
+        return []
+
+    @staticmethod
+    def _coerce_bool(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in ("true", "1", "yes")
+        return bool(value)
 
     def _to_timestamp(self, value: Any) -> float:
         if value is None:

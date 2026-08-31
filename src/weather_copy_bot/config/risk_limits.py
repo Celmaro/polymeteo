@@ -47,7 +47,6 @@ class DailyLimits:
 
     max_daily_loss_usd: float = 50.0
     max_daily_profit_usd: float = 200.0
-    max_trades_per_day: int = 20
     max_orders_per_minute: int = 5
 
 
@@ -143,7 +142,6 @@ class RiskLimits:
                 daily=DailyLimits(
                     max_daily_loss_usd=25.0,
                     max_daily_profit_usd=100.0,
-                    max_trades_per_day=10,
                 ),
                 drawdown=DrawdownLimits(
                     max_drawdown_pct=0.10,
@@ -171,7 +169,6 @@ class RiskLimits:
                 daily=DailyLimits(
                     max_daily_loss_usd=50.0,
                     max_daily_profit_usd=200.0,
-                    max_trades_per_day=20,
                 ),
                 drawdown=DrawdownLimits(
                     max_drawdown_pct=0.15,
@@ -199,7 +196,6 @@ class RiskLimits:
                 daily=DailyLimits(
                     max_daily_loss_usd=100.0,
                     max_daily_profit_usd=500.0,
-                    max_trades_per_day=30,
                 ),
                 drawdown=DrawdownLimits(
                     max_drawdown_pct=0.20,
@@ -283,7 +279,6 @@ class RiskLimits:
             "daily_limits": {
                 "max_loss": self.daily.max_daily_loss_usd,
                 "max_profit": self.daily.max_daily_profit_usd,
-                "max_trades": self.daily.max_trades_per_day,
             },
             "drawdown_limits": {
                 "max": self.drawdown.max_drawdown_pct * 100,
@@ -311,14 +306,12 @@ class RiskValidator:
         self.limits = limits
 
         # State tracking
-        self._daily_trades = 0
         self._daily_pnl = 0.0
         self._consecutive_losses = 0
         self._last_reset_day = 0
 
     def reset_daily(self) -> None:
         """Reset daily counters (call at start of trading day)."""
-        self._daily_trades = 0
         self._daily_pnl = 0.0
         self._last_reset_day = 0  # Would be actual day number
 
@@ -363,15 +356,10 @@ class RiskValidator:
         if size_usd > trading_capital:
             return False, f"Insufficient trading capital: ${size_usd:.2f}"
 
-        # 6. Check daily trade count
-        if self._daily_trades >= self.limits.daily.max_trades_per_day:
-            return False, f"Daily trade limit reached: {self._daily_trades}"
-
         return True, None
 
     def record_trade(self, pnl: float) -> None:
         """Record completed trade for daily tracking."""
-        self._daily_trades += 1
         self._daily_pnl += pnl
 
         if pnl < 0:
@@ -386,7 +374,6 @@ class RiskValidator:
     def get_status(self) -> dict[str, Any]:
         """Get current risk status."""
         return {
-            "daily_trades": self._daily_trades,
             "daily_pnl": self._daily_pnl,
             "consecutive_losses": self._consecutive_losses,
             "limits": self.limits.to_dict(),

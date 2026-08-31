@@ -26,7 +26,6 @@ class RiskLimits:
     # Per-trade limits
     min_trade_size_usd: float = 5.0
     max_trade_size_usd: float = 100.0
-    max_trades_per_day: int = 100
 
     # Latency limits
     max_latency_ms: int = 800
@@ -109,21 +108,28 @@ class RiskEngine:
     def _reset_state(self) -> None:
         """Reset daily state."""
         self._daily_loss = 0.0
-        self._daily_trades = 0
         self._day_key = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         self._open_positions: dict[str, Position] = {}
         self._peak_balance = 0.0
         self._circuit_breaker_tripped = False
         self._circuit_breaker_reason: str | None = None
+        self._circuit_breaker_tripped_at: datetime | None = None
 
     def _check_day_reset(self) -> None:
         """Reset daily counters if new day."""
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         if today != self._day_key:
+            had_breaker = self._circuit_breaker_tripped
             logger.info(f"Resetting daily counters for {today}")
             self._daily_loss = 0.0
-            self._daily_trades = 0
             self._day_key = today
+            # day rollover also clears a tripped circuit breaker: a stall caused by
+            # yesterday's drawdown must never block a fresh day's trading.
+            if had_breaker:
+                logger.warning("Auto-resetting circuit breaker on day rollover")
+                self._circuit_breaker_tripped = False
+                self._circuit_breaker_reason = None
+                self._circuit_breaker_tripped_at = None
 
     def check_trade(
         self,
@@ -167,6 +173,7 @@ class RiskEngine:
                 if drawdown >= self.limits.circuit_breaker_threshold:
                     self._circuit_breaker_tripped = True
                     self._circuit_breaker_reason = f"drawdown:{drawdown:.2%}"
+                    self._circuit_breaker_tripped_at = datetime.now(timezone.utc)
                     return RiskCheck(
                         passed=False,
                         rejected=True,
@@ -190,16 +197,7 @@ class RiskEngine:
                 severity="ERROR",
             )
 
-        # Check 4: Max trades per day
-        if self._daily_trades >= self.limits.max_trades_per_day:
-            return RiskCheck(
-                passed=False,
-                rejected=True,
-                reason="max_trades_per_day",
-                severity="WARNING",
-            )
-
-        # Check 5: Latency
+        # Check 4: Latency
         if signal.latency_ms > self.limits.max_latency_ms:
             return RiskCheck(
                 passed=False,
@@ -208,7 +206,7 @@ class RiskEngine:
                 severity="WARNING",
             )
 
-        # Check 6: Slippage estimate
+        # Check 5: Slippage estimate
         slippage_estimate = signal.latency_ms * 0.02  # Rough estimate
         if slippage_estimate > self.limits.max_slippage_bps:
             return RiskCheck(
@@ -218,7 +216,7 @@ class RiskEngine:
                 severity="WARNING",
             )
 
-        # Check 7: Trade size limits
+        # Check 6: Trade size limits
         if size_usd < self.limits.min_trade_size_usd:
             return RiskCheck(
                 passed=False,
@@ -236,7 +234,7 @@ class RiskEngine:
                 severity="INFO",
             )
 
-        # Check 8: Total exposure
+        # Check 7: Total exposure
         total_exposure = sum(p.size_usd for p in positions) + size_usd
         if total_exposure > self.limits.max_total_exposure_usd:
             available = self.limits.max_total_exposure_usd - sum(p.size_usd for p in positions)
@@ -254,7 +252,7 @@ class RiskEngine:
                 severity="INFO",
             )
 
-        # Check 9: Liquidity
+        # Check 8: Liquidity
         if orderbook_depth > 0 and orderbook_depth < self.limits.min_orderbook_depth_usd:
             return RiskCheck(
                 passed=False,
@@ -263,12 +261,13 @@ class RiskEngine:
                 severity="WARNING",
             )
 
-        # Check 10: Circuit breaker (drawdown)
+        # Check 9: Circuit breaker (drawdown)
         if self.limits.enable_circuit_breaker:
             drawdown = self._calculate_drawdown(balance)
             if drawdown >= self.limits.circuit_breaker_threshold:
                 self._circuit_breaker_tripped = True
                 self._circuit_breaker_reason = f"drawdown:{drawdown:.2%}"
+                self._circuit_breaker_tripped_at = datetime.now(timezone.utc)
                 return RiskCheck(
                     passed=False,
                     rejected=True,
@@ -370,7 +369,6 @@ class RiskEngine:
     def record_trade(self, pnl: float = 0.0) -> None:
         """Record a trade for daily counters."""
         self._check_day_reset()
-        self._daily_trades += 1
         if pnl:
             self._daily_loss += pnl
 
@@ -379,13 +377,16 @@ class RiskEngine:
         logger.warning("Circuit breaker manually reset")
         self._circuit_breaker_tripped = False
         self._circuit_breaker_reason = None
+        self._circuit_breaker_tripped_at = None
 
     def get_state(self) -> dict:
         """Get current risk engine state."""
         return {
             "circuit_breaker_tripped": self._circuit_breaker_tripped,
+            "circuit_breaker_tripped_at": self._circuit_breaker_tripped_at.isoformat()
+            if self._circuit_breaker_tripped_at
+            else None,
             "circuit_breaker_reason": self._circuit_breaker_reason,
-            "daily_trades": self._daily_trades,
             "daily_pnl": self._daily_loss,
             "peak_balance": self._peak_balance,
             "open_positions": len(self._open_positions),

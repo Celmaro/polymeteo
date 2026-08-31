@@ -57,6 +57,10 @@ POLL_FAILURE_BACKOFF_CAP_S = 5.0
 # spamming per-poll noise on top of the per-signal event trail.
 STATS_LOG_INTERVAL_S = 60.0
 
+# WS boot bound: the engine degrades to polling when the socket is slow or
+# unreachable, so the connect must never block engine startup without limit.
+WS_CONNECT_TIMEOUT_S = 5.0
+
 
 def _failure_backoff_delay(failures: int, base_interval_s: float) -> float:
     """Exponential backoff after consecutive poll failures, capped at 5s."""
@@ -133,6 +137,10 @@ class CopyEngine:
             "quorum_votes": 0,
             "quorum_reached": 0,
             "quorum_rejected": 0,
+            # Events dropped during poll_once parsing (bad timestamps, missing
+            # ids, malformed fields); they are never marked seen so a later
+            # well-formed delivery of the same event can still be processed.
+            "malformed_events": 0,
             # NOTE: ``live_orders_*`` counters are only meaningful when
             # ``settings.live_trading_enabled`` is True (i.e. dry_run=False AND
             # a private key is configured). In paper mode the submission path
@@ -164,13 +172,17 @@ class CopyEngine:
 
         # Rolling samples for the latency / upstream-age percentile histograms
         # (audit P1). Capped so a long-running process cannot grow them without
-        # bound; oldest sample is evicted on overflow.
+        # bound; oldest sample is evicted on overflow. Upstream-age entries
+        # carry the record timestamp so the percentile can drop data older
+        # than _UPSTREAM_AGE_WINDOW_S and reflect current freshness instead of
+        # ancient one-off outliers.
         self._latency_samples: list[int] = []
-        self._upstream_age_samples: list[int] = []
+        self._upstream_age_samples: list[tuple[float, int]] = []
         # Audit P4: timestamps of every 429 observed since start; pruned to a
         # 5-minute window on each STATS log so the windowed count stays O(N).
         self._upstream_429_ts: list[float] = []
         self._HIST_MAX_SAMPLES = 1000
+        self._UPSTREAM_AGE_WINDOW_S = 3600.0
 
         # Always route the client's 429 events through the engine so the
         # ``upstream_429_rejections`` counter ticks regardless of how the
@@ -292,7 +304,8 @@ class CopyEngine:
         # Cheap O(N) prune: drop anything older than the window. _log_stats_snapshot
         # also prunes on every STATS tick so this list never exceeds a handful
         # of entries between snapshots.
-        cutoff = time.time() - 300.0
+        now_ts = time.time()
+        cutoff = now_ts - 300.0
         self._upstream_429_ts = [ts for ts in self._upstream_429_ts if ts >= cutoff]
         self.stats["upstream_429_last_5m"] = len(self._upstream_429_ts)
         logger.warning(
@@ -311,9 +324,14 @@ class CopyEngine:
         local processing lag (0 in production where we have no detect-side
         clock), ``upstream_age_ms`` is the age of the upstream event when we
         received it.
+
+        Upstream-age samples are stored as ``(recorded_at, value)`` tuples so
+        the STATS snapshot can compute percentiles over a rolling
+        ``_UPSTREAM_AGE_WINDOW_S`` window instead of an all-time histogram
+        (which pinned age_p99 to ancient events forever).
         """
         self._latency_samples.append(max(0, int(latency_ms)))
-        self._upstream_age_samples.append(max(0, int(upstream_age_ms)))
+        self._upstream_age_samples.append((time.time(), max(0, int(upstream_age_ms))))
         if len(self._latency_samples) > self._HIST_MAX_SAMPLES:
             self._latency_samples = self._latency_samples[-self._HIST_MAX_SAMPLES:]
         if len(self._upstream_age_samples) > self._HIST_MAX_SAMPLES:
@@ -555,6 +573,7 @@ class CopyEngine:
         events = await self.client.fetch_target_activity(
             wallets=wallets,
             market_filter=self.settings.market_filter,
+            min_size_usd=self.risk.limits.min_trade_size_usd if self.risk else 0.0,
         )
         fresh: list[TradeSignal] = []
         now = datetime.now(timezone.utc)
@@ -564,40 +583,52 @@ class CopyEngine:
         cycle_skip_stale = 0
         cycle_skip_other = 0
         for event in events:
-            key = (
-                event.get("id")
-                or f"{event.get('wallet')}:{event.get('timestamp')}:{event.get('market')}"
-            )
+            key = event.get("id")
+            if not key:
+                # Empty transaction hashes must never be deduped (all of them
+                # would collide on the same key); skip them with a log instead.
+                self.stats["malformed_events"] += 1
+                logger.warning("dropping event with empty id: %s", event)
+                continue
             if key in self._seen:
                 continue
-            self._remember(key, now_ts)
-            target_filled = datetime.fromisoformat(event["timestamp"].replace("Z", "+00:00"))
-            # Two-tier latency (audit P0): upstream_age_ms is how old the
-            # upstream event was when we received it (data staleness);
-            # latency_ms is the local detect-to-decision lag. The demo path
-            # injects a synthetic local latency so the existing ``latency_ms``
-            # semantic (local processing) stays meaningful even when upstream
-            # timestamps are absent.
-            upstream_age_ms = int((now - target_filled).total_seconds() * 1000)
-            latency_ms = int(event.get("latency_ms", 420)) if event.get("demo") else 0
-            signal = TradeSignal(
-                signal_id=str(uuid.uuid4()),
-                target_wallet=event["wallet"],
-                market_slug=event["market_slug"],
-                market_title=event.get("market_title", event["market_slug"]),
-                city=event.get("city", "Unknown"),
-                outcome=event.get("outcome", "Yes"),
-                side=Side(event.get("side", "BUY")),
-                price=float(event.get("price", 0.5)),
-                size_usd=float(event.get("size_usd", 50)),
-                detected_at=now,
-                target_filled_at=target_filled,
-                latency_ms=latency_ms,
-                upstream_age_ms=upstream_age_ms,
-                token_id=event.get("token_id"),
-            )
+            try:
+                target_filled = datetime.fromisoformat(
+                    str(event["timestamp"]).replace("Z", "+00:00")
+                )
+                # Two-tier latency (audit P0): upstream_age_ms is how old the
+                # upstream event was when we received it (data staleness);
+                # latency_ms is the local detect-to-decision lag. The demo path
+                # injects a synthetic local latency so the existing ``latency_ms``
+                # semantic (local processing) stays meaningful even when upstream
+                # timestamps are absent.
+                upstream_age_ms = int((now - target_filled).total_seconds() * 1000)
+                latency_ms = int(event.get("latency_ms", 420)) if event.get("demo") else 0
+                signal = TradeSignal(
+                    signal_id=str(uuid.uuid4()),
+                    target_wallet=event["wallet"],
+                    market_slug=event["market_slug"],
+                    market_title=event.get("market_title", event["market_slug"]),
+                    city=event.get("city", "Unknown"),
+                    outcome=event.get("outcome", "Yes"),
+                    side=Side(event.get("side", "BUY")),
+                    price=float(event.get("price", 0.5)),
+                    size_usd=float(event.get("size_usd", 50)),
+                    detected_at=now,
+                    target_filled_at=target_filled,
+                    latency_ms=latency_ms,
+                    upstream_age_ms=upstream_age_ms,
+                    token_id=event.get("token_id"),
+                )
+            except Exception as exc:
+                self.stats["malformed_events"] += 1
+                logger.warning("dropping malformed event id=%s: %s", key, exc)
+                continue
             fresh.append(signal)
             decision = await self._route_signal(event, signal)
+            # Mark seen only after the event survived parsing AND routing so a
+            # transient failure does not permanently swallow the fill.
+            self._remember(key, now_ts)
             if decision is not None:
                 if decision.should_copy:
                     if signal.side == Side.BUY:
@@ -682,6 +713,13 @@ class CopyEngine:
             logger.info("SKIP %s (%s)", signal.market_slug, decision.reason)
         if self.quorum is None:
             return decision
+        if event.get("source") == "ws" and (
+            not signal.token_id or signal.size_usd <= 0
+        ):
+            # Stream-origin trades carry no token id / size; feeding them into
+            # the quorum buffer would mint consensus votes that can never map
+            # back to a real copyable market.
+            return decision
         key = f"{signal.token_id or signal.market_slug}:{signal.side.value}"
         self._quorum_meta[key] = {
             "market_slug": signal.market_slug,
@@ -689,6 +727,11 @@ class CopyEngine:
             "city": signal.city,
             "outcome": signal.outcome,
         }
+        # Evict oldest-inserted entries so a long-running engine cannot grow
+        # the metadata map without bound.
+        while len(self._quorum_meta) > 1000:
+            oldest_key = next(iter(self._quorum_meta))
+            del self._quorum_meta[oldest_key]
         result = self.quorum.register_signal(
             WalletTradeSignal(
                 wallet_address=signal.target_wallet,
@@ -820,7 +863,8 @@ class CopyEngine:
         # even if no 429 has been observed recently (record_rate_limit also
         # prunes, but a long quiet stretch after the last 429 leaves stale
         # entries until the next event).
-        cutoff = time.time() - 300.0
+        now_ts = time.time()
+        cutoff = now_ts - 300.0
         self._upstream_429_ts = [ts for ts in self._upstream_429_ts if ts >= cutoff]
         s["upstream_429_last_5m"] = len(self._upstream_429_ts)
         # Audit P1: refresh p50/p99 for both latency dimensions from the
@@ -828,18 +872,33 @@ class CopyEngine:
         # chart them directly without re-running percentile math.
         s["latency_p50_ms"] = self._percentile(self._latency_samples, 50.0)
         s["latency_p99_ms"] = self._percentile(self._latency_samples, 99.0)
-        s["upstream_age_p50_ms"] = self._percentile(self._upstream_age_samples, 50.0)
-        s["upstream_age_p99_ms"] = self._percentile(self._upstream_age_samples, 99.0)
+        # Rolling-window upstream-age percentiles: drop samples older than
+        # _UPSTREAM_AGE_WINDOW_S so p99 reflects *current* freshness instead
+        # of the worst event since process start.
+        age_cutoff = now_ts - self._UPSTREAM_AGE_WINDOW_S
+        self._upstream_age_samples = [
+            (ts, v) for ts, v in self._upstream_age_samples if ts >= age_cutoff
+        ]
+        age_values = [v for _, v in self._upstream_age_samples]
+        s["upstream_age_p50_ms"] = self._percentile(age_values, 50.0)
+        s["upstream_age_p99_ms"] = self._percentile(age_values, 99.0)
         # Collapse the signals_by_reason histogram into a compact ``a=1,b=2``
         # suffix so a single STATS line still tells the operator why signals
         # were skipped (stale / size / edge / risk / dedup / upstream_429).
         reasons = ",".join(f"{k}={v}" for k, v in sorted(s["signals_by_reason"].items()))
+        # Surface the risk-gate state on every heartbeat: a tripped circuit
+        # breaker silently freezes ``risk_rejected`` (all trades rejected with
+        # no counter movement), so the STATS line must name the active gate.
+        risk_state = self.risk.get_state() if self.risk is not None else {}
+        breaker = risk_state.get("circuit_breaker_tripped", False)
+        breaker_reason = risk_state.get("circuit_breaker_reason") or "-"
+        daily_loss = float(risk_state.get("daily_pnl", 0.0) or 0.0)
         logger.info(
             "STATS mode=%s detected=%s copied=%s skipped=%s risk_rejected=%s "
             "quorum_votes=%s reached=%s rejected=%s live_filled=%s live_failed=%s "
             "live_dup=%s live_throttled=%s targets=%s balance=$%.2f upstream_429=%s "
             "upstream_429_5m=%s latency_p50=%s latency_p99=%s age_p50=%s age_p99=%s "
-            "reasons={%s}",
+            "breaker=%s breaker_reason=%s daily_loss=$%.2f reasons={%s}",
             "paper" if s["dry_run"] else "live",
             s["signals_detected"],
             s["copied"],
@@ -860,6 +919,9 @@ class CopyEngine:
             s["latency_p99_ms"] if s["latency_p99_ms"] is not None else "-",
             s["upstream_age_p50_ms"] if s["upstream_age_p50_ms"] is not None else "-",
             s["upstream_age_p99_ms"] if s["upstream_age_p99_ms"] is not None else "-",
+            breaker,
+            breaker_reason,
+            daily_loss,
             reasons,
         )
 
@@ -908,7 +970,7 @@ class CopyEngine:
 
         self._ws = CLOBWebSocket(on_trade=self._on_ws_trade)
         try:
-            await self._ws.connect()
+            await asyncio.wait_for(self._ws.connect(), timeout=WS_CONNECT_TIMEOUT_S)
             logger.info("CLOB WebSocket connected")
         except Exception as exc:
             logger.warning("CLOB WebSocket connect failed (continuing with polling only): %s", exc)
@@ -957,6 +1019,10 @@ class CopyEngine:
                 await self.quorum.stop_cleanup_task()
             if started_queue:
                 await self.order_queue.stop()
+            if self._ws_task is not None:
+                self._ws_task.cancel()
+                await asyncio.gather(self._ws_task, return_exceptions=True)
+                self._ws_task = None
             if self._ws is not None:
                 await self._ws.disconnect()
             self._running = False

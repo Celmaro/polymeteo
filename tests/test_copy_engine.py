@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+import weather_copy_bot.engine.copy_engine as copy_engine_module
 from weather_copy_bot.backtest.engine import CopyBacktester
 from weather_copy_bot.config import Settings
 from weather_copy_bot.engine.copy_engine import (
@@ -22,6 +23,31 @@ from weather_copy_bot.engine.quorum import QuorumEngine
 from weather_copy_bot.live.risk_engine import RiskEngine, RiskLimits
 from weather_copy_bot.models import CopyDecision, Side, TradeSignal
 from weather_copy_bot.paper.trader import PaperTrader
+
+
+@pytest.fixture(autouse=True)
+def _no_real_websocket(monkeypatch):
+    """Engine boot must never open a real CLOB WebSocket in tests.
+
+    ``run()`` degrades to polling when the connect fails, so a connect that
+    always raises keeps the boot path deterministic and instant.
+    """
+
+    class _OfflineWS:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def connect(self):
+            raise OSError("test: no outbound websockets")
+
+        async def disconnect(self):
+            return None
+
+        async def run(self):
+            return None
+
+    monkeypatch.setattr(copy_engine_module, "CLOBWebSocket", _OfflineWS)
+
 
 
 def _signal(
@@ -357,7 +383,7 @@ class TestRiskFeedbackLoop:
 
         assert copied == 25
         assert rejected == 5
-        assert risk.get_state()["daily_trades"] == 25
+        assert risk.get_state()["daily_pnl"] == pytest.approx(-20.5, abs=2.0)
 
     @pytest.mark.asyncio
     async def test_live_fill_records_state_and_trade_count(self):
@@ -372,7 +398,6 @@ class TestRiskFeedbackLoop:
         assert decision.should_copy is True
         assert engine.stats["live_orders_filled"] == 1
         state = risk.get_state()
-        assert state["daily_trades"] == 1
         assert state["open_positions"] == 1
 
     @pytest.mark.asyncio

@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import time
+
 import httpx
 import pytest
+from polymarket_apis.clients.data_client import PolymarketDataClient
+from polymarket_apis.clients.gamma_client import PolymarketGammaClient
 
 from weather_copy_bot.config import Settings
 from weather_copy_bot.engine.copy_engine import CopyEngine
@@ -12,8 +16,6 @@ from weather_copy_bot.engine.wallet_discovery import (
     WalletDiscovery,
 )
 from weather_copy_bot.polymarket.client import PolymarketClient
-from polymarket_apis.clients.data_client import PolymarketDataClient
-from polymarket_apis.clients.gamma_client import PolymarketGammaClient
 
 DEMO_WALLET = "0x7a21c4e8b9f0d3a6e1c58294f0ab73d6e8c91f22"
 
@@ -62,7 +64,7 @@ def _trade_item(wallet: str, shares: float, price: float, ts: int, side: str = "
     }
 
 
-def _activity_event(wallet: str, size: float, ts: float, slug: str = "m1") -> dict:
+def _activity_event(wallet: str, size: float, ts: float, slug: str = "highest-temperature-in-new-york") -> dict:
     return {
         "wallet": wallet,
         "timestamp": ts,
@@ -328,20 +330,25 @@ class TestDiscoverWeatherWalletsHttp:
 
 class TestWalletDiscoveryRegistry:
     @staticmethod
-    def _events(wallet: str, n: int, size: float, slug: str = "m1") -> list[dict]:
-        return [_activity_event(wallet, size, 1000.0 + i, slug) for i in range(n)]
+    def _events(wallet: str, n: int, size: float, slug: str = "highest-temperature-in-new-york") -> list[dict]:
+        # Recent timestamps: promotion now enforces a candidate TTL, so
+        # historical (epoch-1970) events would age out of the candidate pool.
+        base = time.time()
+        return [_activity_event(wallet, size, base - i, slug) for i in range(n)]
 
     def test_observe_aggregates_trades_volume_and_markets(self):
         disc = WalletDiscovery(settings=_discovery_settings())
         disc.observe(self._events("0xAAA", n=3, size=100.0))
-        disc.observe([_activity_event("0xAAA", 50.0, 2000.0, slug="m2")])
+        disc.observe(
+            [_activity_event("0xAAA", 50.0, time.time(), slug="will-it-rain-in-london")]
+        )
         qualified = disc.candidates()
         assert len(qualified) == 1
         record = qualified[0]
         assert record.address == "0xaaa"
         assert record.trades_seen == 4
         assert record.volume_usd == 350.0
-        assert record.markets == {"m1", "m2"}
+        assert record.markets == {"highest-temperature-in-new-york", "will-it-rain-in-london"}
 
     def test_promotion_requires_both_thresholds(self):
         disc = WalletDiscovery(settings=_discovery_settings())
@@ -380,9 +387,11 @@ class TestWalletDiscoveryRegistry:
         assert promoted == ["0xhigh", "0xmid", "0xlow"]
         assert len(promoted) == len(disc.candidates())
 
-    def test_settings_default_ships_without_promotion_cap(self, monkeypatch):
+    def test_settings_default_ships_with_bounded_promotion_cap(self, monkeypatch):
+        # The discovered-wallet registry feeds the live polling rotation, so
+        # the default must stay bounded to keep unbounded growth impossible.
         monkeypatch.delenv("MAX_DISCOVERED_TARGETS", raising=False)
-        assert Settings().max_discovered_targets is None
+        assert Settings().max_discovered_targets == 10
 
     def test_static_and_demo_wallets_never_promoted(self):
         settings = _discovery_settings(target_wallets=["0xStatic"])
@@ -404,10 +413,11 @@ class TestMergedTargetProvider:
 
     def test_merges_discovered_after_static(self):
         disc = WalletDiscovery(settings=_discovery_settings())
+        now = time.time()
         disc.observe(
             [
-                _activity_event("0xDISC1", 500.0, 1.0),
-                _activity_event("0xDISC1", 500.0, 2.0),
+                _activity_event("0xDISC1", 500.0, now - 1.0),
+                _activity_event("0xDISC1", 500.0, now),
             ]
         )
         provider = MergedTargetProvider(["0xstatic"], discovery=disc)
@@ -415,10 +425,11 @@ class TestMergedTargetProvider:
 
     def test_case_insensitive_dedup_between_sources(self):
         disc = WalletDiscovery(settings=_discovery_settings())
+        now = time.time()
         disc.observe(
             [
-                _activity_event("0xSTATIC", 500.0, 1.0),
-                _activity_event("0xSTATIC", 500.0, 2.0),
+                _activity_event("0xSTATIC", 500.0, now - 1.0),
+                _activity_event("0xSTATIC", 500.0, now),
             ]
         )
         provider = MergedTargetProvider(["0xStatic"], discovery=disc)
@@ -433,8 +444,10 @@ class _StubClient:
     def default_demo_wallets(self) -> list[str]:
         return ["0xdemo1"]
 
-    async def fetch_target_activity(self, wallets, market_filter):
-        self.calls.append({"wallets": list(wallets), "market_filter": market_filter})
+    async def fetch_target_activity(self, wallets, market_filter, min_size_usd=0.0):
+        self.calls.append(
+            {"wallets": list(wallets), "market_filter": market_filter, "min_size_usd": min_size_usd}
+        )
         return self.events
 
 
@@ -485,13 +498,15 @@ class TestCopyEngineTargetProviderSeam:
 
 class TestWalletDiscoveryRun:
     async def test_single_cycle_observes_and_promotes(self):
+        base = time.time()
+
         class StubDiscoveryClient(PolymarketClient):
             async def discover_weather_wallets(
                 self, max_markets: int = 5, trades_per_market: int = 50
             ):
                 return [
-                    _activity_event("0xloop", 500.0, 1.0),
-                    _activity_event("0xloop", 500.0, 2.0),
+                    _activity_event("0xloop", 500.0, base - 1.0),
+                    _activity_event("0xloop", 500.0, base),
                 ]
 
         settings = _discovery_settings(discovery_interval_s=0.01)

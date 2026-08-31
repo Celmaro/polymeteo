@@ -172,26 +172,28 @@ class TestRiskEngine:
         assert "drawdown" in check.reason or "circuit_breaker" in check.reason
 
     def test_record_trade(self):
-        """Test recording trade for daily counters."""
+        """Test recording trade updates daily loss accounting only."""
         engine = RiskEngine()
-        initial_trades = engine._daily_trades
 
-        engine.record_trade(pnl=10.0)
+        engine.record_trade(pnl=-10.0)
 
-        assert engine._daily_trades == initial_trades + 1
+        assert engine._daily_loss == -10.0
 
     def test_day_reset(self):
-        """Test that daily counters reset on new day."""
+        """Test that daily loss resets and a tripped breaker auto-clears on a new day."""
         engine = RiskEngine()
-        engine._daily_trades = 10
         engine._daily_loss = -100.0
         engine._day_key = "2020-01-01"  # Old date
+        engine._circuit_breaker_tripped = True
+        engine._circuit_breaker_reason = "drawdown"
 
         # Trigger day reset
         engine._check_day_reset()
 
-        assert engine._daily_trades == 0
         assert engine._daily_loss == 0.0
+        assert engine._circuit_breaker_tripped is False
+        assert engine._circuit_breaker_reason is None
+        assert engine._circuit_breaker_tripped_at is None
 
 
 class TestLiquidityChecker:
