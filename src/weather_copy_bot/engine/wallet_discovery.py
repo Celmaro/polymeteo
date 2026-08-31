@@ -101,12 +101,28 @@ class DiscoveredWallet:
     trades_seen: int = 0
     volume_usd: float = 0.0
     markets: set[str] = field(default_factory=set)
+    weather_trades: int = 0
 
-    def observe(self, *, timestamp: float, size_usd: float, market_slug: str) -> None:
+    @property
+    def weather_share(self) -> float:
+        if self.trades_seen <= 0:
+            return 0.0
+        return self.weather_trades / self.trades_seen
+
+    def observe(
+        self,
+        *,
+        timestamp: float,
+        size_usd: float,
+        market_slug: str,
+        is_weather: bool = True,
+    ) -> None:
         self.last_seen = max(self.last_seen, timestamp)
         self.trades_seen += 1
         self.volume_usd += size_usd
         self.markets.add(market_slug)
+        if is_weather:
+            self.weather_trades += 1
 
 
 class WalletDiscovery:
@@ -149,10 +165,20 @@ class WalletDiscovery:
             if record is None:
                 record = DiscoveredWallet(address=wallet, first_seen=now, last_seen=now)
                 self._wallets[wallet] = record
+            market_slug = str(event.get("market_slug", ""))
+            title = str(event.get("market_title") or event.get("title") or "")
+            haystack = f"{market_slug} {title}".lower().strip()
+            # Events without any market metadata come from the weather-market
+            # discovery pipeline itself; count them as weather. Only identifiable
+            # non-weather markets drag the share down.
+            is_weather = not haystack or any(
+                k in haystack for k in self.settings.weather_keywords
+            )
             record.observe(
                 timestamp=float(event.get("timestamp", 0.0) or 0.0),
                 size_usd=float(event.get("size_usd", 0.0) or 0.0),
-                market_slug=str(event.get("market_slug", "")),
+                market_slug=market_slug,
+                is_weather=is_weather,
             )
             touched.add(wallet)
             accepted += 1
@@ -161,12 +187,15 @@ class WalletDiscovery:
         return len(touched)
 
     def candidates(self) -> list[DiscoveredWallet]:
-        """Wallets meeting both minimum thresholds, highest conviction first."""
+        """Wallets meeting every promotion gate, highest conviction first."""
+        ttl_cutoff = time.time() - self.settings.candidate_ttl_hours * 3600.0
         qualified = [
             w
             for w in self._wallets.values()
             if w.trades_seen >= self.settings.min_candidate_trades
             and w.volume_usd >= self.settings.min_candidate_volume_usd
+            and w.last_seen >= ttl_cutoff
+            and w.weather_share >= self.settings.min_weather_share
         ]
         qualified.sort(key=lambda w: (w.volume_usd, w.trades_seen), reverse=True)
         return qualified
@@ -224,6 +253,10 @@ class WalletDiscovery:
                     max_markets=self.settings.discovery_max_markets,
                     trades_per_market=self.settings.discovery_trades_per_market,
                 )
+                if not events:
+                    logger.info(
+                        "discovery cycle: zero markets/observations; skipping"
+                    )
                 touched = self.observe(events)
                 consecutive_failures = 0
                 self.stats["consecutive_failures"] = 0
@@ -260,10 +293,12 @@ class WalletDiscovery:
                     consecutive_failures,
                     delay,
                 )
-                await asyncio.sleep(delay)
-                # Bounded runs must terminate even when every cycle fails.
+                # Bounded runs must terminate even when every cycle fails;
+                # check the budget before sleeping so a large backoff does not
+                # overshoot the requested duration.
                 if duration_sec is not None and (time.time() - started) >= duration_sec:
                     break
+                await asyncio.sleep(delay)
                 continue
             if duration_sec is not None and (time.time() - started) >= duration_sec:
                 break

@@ -9,6 +9,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from weather_copy_bot.config import get_settings
+from weather_copy_bot.db import weather_models as _weather_models  # noqa: F401
 from weather_copy_bot.db.models import Base
 
 
@@ -39,6 +40,7 @@ class DatabaseManager:
                 bind=self.engine,
                 autocommit=False,
                 autoflush=False,
+                expire_on_commit=False,
             )
         return self._session_factory
 

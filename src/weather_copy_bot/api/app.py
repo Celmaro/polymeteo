@@ -172,6 +172,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 min_quorum_count=settings.quorum_min_count,
                 window_seconds=float(settings.quorum_window_seconds),
                 max_acceptable_price=settings.quorum_max_acceptable_price,
+                consensus_window_seconds=settings.signal_consensus_window_ms / 1000.0,
             )
             logger.info(
                 "Quorum consensus enabled min_count=%s window_s=%s max_price=%s",

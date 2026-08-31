@@ -55,11 +55,36 @@ class Settings(BaseSettings):
     discovery_interval_s: float = 30.0
     discovery_max_markets: int = 5
     discovery_trades_per_market: int = 50
-    # None promotes every qualified candidate into the polling rotation;
-    # set an integer via MAX_DISCOVERED_TARGETS to cap it explicitly.
-    max_discovered_targets: int | None = None
+    # Caps how many discovered wallets join the polling rotation; set to a
+    # larger integer via MAX_DISCOVERED_TARGETS if more coverage is wanted.
+    max_discovered_targets: int | None = 10
     min_candidate_trades: int = 3
     min_candidate_volume_usd: float = 100.0
+
+    # Demo mode is the ONLY situation where the client returns fabricated
+    # stub markets / demo trade events. Defaults to False so production never
+    # silently trades on made-up data.
+    demo_mode: bool = False
+
+    # Cities (keys into analysis.city_config.CITY_CONFIG) that the slug-based
+    # temperature-market event discovery should scan.
+    weather_cities: list[str] = Field(
+        default_factory=lambda: ["nyc", "chicago", "miami", "los_angeles", "denver"]
+    )
+
+    # Bound on the initial WebSocket connect attempt at engine boot; on
+    # timeout/failure the engine logs and continues poll-only.
+    ws_connect_timeout_s: float = 5.0
+
+    # WalletDiscovery registry hygiene: evict least-recently-seen wallets past
+    # this size and drop candidates/promotions whose last_seen is older than
+    # the TTL.
+    max_registry_size: int = 5000
+    candidate_ttl_hours: float = 72.0
+
+    # Minimum fraction of a wallet's observed trades that must be on weather
+    # markets before it can be promoted as a copy target.
+    min_weather_share: float = 0.5
 
     # Consensus quorum: when N distinct target wallets take the same token/side
     # within the window, one copy fires at the size-weighted average price.
@@ -123,6 +148,26 @@ class Settings(BaseSettings):
     sentry_environment: str = "production"
     sentry_traces_sample_rate: float = 1.0
 
+    scheduler_enabled: bool = False
+    weather_refresh_interval_s: int = 900
+    market_refresh_interval_s: int = 300
+    snapshot_export_interval_s: int = 3600
+    snapshot_output_dir: str = "data/parquet"
+
+    uptime_kuma_push_url: str = ""
+    apprise_urls: list[str] = Field(default_factory=list)
+
+    @field_validator("apprise_urls", mode="before")
+    @classmethod
+    def split_apprise_urls(cls, value: object) -> list[str]:
+        if value is None or value == "":
+            return []
+        if isinstance(value, str):
+            return [u.strip() for u in value.split(",") if u.strip()]
+        if isinstance(value, list):
+            return [str(u).strip() for u in value if str(u).strip()]
+        return []
+
     @field_validator("target_wallets", mode="before")
     @classmethod
     def split_wallets(cls, value: object) -> list[str]:
@@ -145,6 +190,17 @@ class Settings(BaseSettings):
         if isinstance(value, list):
             return [str(w).strip() for w in value if str(w).strip()]
         return []
+
+    @field_validator("weather_cities", mode="before")
+    @classmethod
+    def split_weather_cities(cls, value: object) -> list[str]:
+        if value is None or value == "":
+            return ["nyc", "chicago", "miami", "los_angeles", "denver"]
+        if isinstance(value, str):
+            return [c.strip().lower() for c in value.split(",") if c.strip()]
+        if isinstance(value, list):
+            return [str(c).strip().lower() for c in value if str(c).strip()]
+        return ["nyc", "chicago", "miami", "los_angeles", "denver"]
 
     @field_validator("cors_origins", mode="before")
     @classmethod

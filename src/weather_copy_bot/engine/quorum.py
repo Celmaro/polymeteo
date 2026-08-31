@@ -56,10 +56,12 @@ class QuorumEngine:
         window_seconds: float = 600.0,
         max_acceptable_price: float = 0.85,
         clock: Callable[[], float] | None = None,
+        consensus_window_seconds: float | None = None,
     ) -> None:
         self.min_quorum_count = min_quorum_count
         self.window_seconds = window_seconds
         self.max_acceptable_price = max_acceptable_price
+        self.consensus_window_seconds = consensus_window_seconds
         self._clock: Callable[[], float] = clock or time.time
 
         self._buffers: dict[str, list[WalletTradeSignal]] = defaultdict(list)
@@ -92,10 +94,15 @@ class QuorumEngine:
         buffer.append(signal)
         self._stats["signals_buffered"] += 1
 
-        if len(buffer) < self.min_quorum_count:
+        effective = buffer
+        if self.consensus_window_seconds is not None:
+            consensus_cutoff = now - self.consensus_window_seconds
+            effective = [v for v in buffer if v.timestamp >= consensus_cutoff]
+
+        if len(effective) < self.min_quorum_count:
             return None
 
-        result = self._evaluate(buffer)
+        result = self._evaluate(effective)
         if result is not None:
             self._buffers.pop(key, None)
             self._price_reject_len.pop(key, None)

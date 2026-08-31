@@ -115,6 +115,23 @@ services:
     networks:
       - polymeteo-net
 
+  # ── Uptime Kuma: self-hosted status monitor (push + HTTP monitors) ──────────
+  uptime-kuma:
+    image: louislam/uptime-kuma:1.23.16
+    container_name: polymeteo-uptime-kuma
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+    environment:
+      UPTIME_KUMA_DISABLE_FRAME_SAMEORIGIN: "${KUMA_DISABLE_FRAME_SAMEORIGIN:-false}"
+    volumes:
+      - uptime-kuma-data:/app/data
+    depends_on:
+      bot:
+        condition: service_healthy
+    networks:
+      - polymeteo-net
+
   # ── Optional: Cloudflare Tunnel (expose Grafana without opening ports) ────────
   cloudflare-tunnel:
     image: cloudflare/cloudflared:2024.4
@@ -134,6 +151,7 @@ volumes:
   grafana-data:
   sentry-data:
   n8n-data:
+  uptime-kuma-data:
 
 # ── Network ───────────────────────────────────────────────────────────────────
 networks:

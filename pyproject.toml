@@ -43,6 +43,9 @@ dependencies = [
   "sentence-transformers>=2.7.0",
   "duckdb>=0.9.0",
   "pyarrow>=14.0.0",
+  "pandera>=0.20.0",
+  "apprise>=1.7.0",
+  "apscheduler>=3.10.0",
   # Web3/EIP-712 signing (live trading)
   "eth-account>=0.9.0",
   "web3>=6.0.0",

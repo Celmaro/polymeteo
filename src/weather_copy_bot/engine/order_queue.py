@@ -368,10 +368,15 @@ class OrderQueue:
         """Stop the queue processor."""
         self._running = False
 
-        if self._processor_task:
-            self._processor_task.cancel()
-        if self._cleanup_task:
-            self._cleanup_task.cancel()
+        tasks = [
+            task
+            for task in (self._processor_task, self._cleanup_task)
+            if task is not None
+        ]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
         logger.info("[Queue] Order queue processor stopped")
 

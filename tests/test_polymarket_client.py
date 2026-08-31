@@ -240,7 +240,7 @@ class TestFetchTargetActivityHttp:
                             "profileImage": "",
                             "profileImageOptimized": "",
                             "transactionHash": "0x"
-                            + "00"
+                             "00"
                             + "11"
                             * 31,
                             "timestamp": 1700000000.0,
@@ -295,7 +295,7 @@ class TestFetchTargetActivityHttp:
             }
 
         def handler(request: httpx.Request) -> httpx.Response:
-            wallet = request.url.params.get("user", "?")
+            assert request.url.params.get("user") is not None
             return httpx.Response(
                 200,
                 json=[
