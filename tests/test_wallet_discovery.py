@@ -39,7 +39,6 @@ def _discovery_settings(**overrides) -> Settings:
     values: dict = {
         "wallet_discovery_enabled": True,
         "target_wallets": [],
-        "max_discovered_targets": 2,
         "min_candidate_trades": 2,
         "min_candidate_volume_usd": 100.0,
     }
@@ -361,21 +360,29 @@ class TestWalletDiscoveryRegistry:
         )
         assert disc.promoted_wallets() == ["0xbig"]
 
-    def test_sorting_prefers_higher_volume_then_caps_targets(self):
-        settings = _discovery_settings(max_discovered_targets=1)
-        disc = WalletDiscovery(settings=settings)
+    def test_sorting_prefers_higher_volume(self):
+        disc = WalletDiscovery(settings=_discovery_settings())
         disc.observe(
             [
                 *self._events("0xlow", n=3, size=110.0),
                 *self._events("0xhigh", n=3, size=400.0),
             ]
         )
-        assert disc.promoted_wallets() == ["0xhigh"]
+        assert disc.promoted_wallets() == ["0xhigh", "0xlow"]
         assert len(disc.candidates()) == 2
 
+    def test_explicit_max_targets_caps_promotion(self):
+        disc = WalletDiscovery(settings=_discovery_settings())
+        disc.observe(
+            [
+                *self._events("0xlow", n=3, size=110.0),
+                *self._events("0xhigh", n=3, size=400.0),
+            ]
+        )
+        assert disc.promoted_wallets(max_targets=1) == ["0xhigh"]
+
     def test_uncapped_default_promotes_every_qualified_wallet(self):
-        settings = _discovery_settings(max_discovered_targets=None)
-        disc = WalletDiscovery(settings=settings)
+        disc = WalletDiscovery(settings=_discovery_settings())
         disc.observe(
             [
                 *self._events("0xlow", n=3, size=110.0),
@@ -387,11 +394,75 @@ class TestWalletDiscoveryRegistry:
         assert promoted == ["0xhigh", "0xmid", "0xlow"]
         assert len(promoted) == len(disc.candidates())
 
-    def test_settings_default_ships_with_bounded_promotion_cap(self, monkeypatch):
-        # The discovered-wallet registry feeds the live polling rotation, so
-        # the default must stay bounded to keep unbounded growth impossible.
-        monkeypatch.delenv("MAX_DISCOVERED_TARGETS", raising=False)
-        assert Settings().max_discovered_targets == 10
+    def test_settings_has_no_rotation_cap(self):
+        # The discovered-wallet rotation is intentionally uncapped; registry size
+        # and TTL are the only growth bounds. No MAX_DISCOVERED_TARGETS field
+        # should exist.
+        assert not hasattr(Settings(), "max_discovered_targets")
+
+    def test_max_trades_per_day_gate_rejects_spammer(self):
+        settings = _discovery_settings(max_candidate_trades_per_day=3)
+        disc = WalletDiscovery(settings=settings)
+        now = time.time()
+        disc.observe(
+            [_activity_event("0xspam", 200.0, now - i * 60) for i in range(5)]
+        )
+        assert disc.promoted_wallets() == []
+
+    def test_max_trades_per_day_gate_passes_within_budget(self):
+        settings = _discovery_settings(max_candidate_trades_per_day=3)
+        disc = WalletDiscovery(settings=settings)
+        now = time.time()
+        disc.observe(
+            [_activity_event("0xsteady", 200.0, now - i * 60) for i in range(3)]
+        )
+        assert disc.promoted_wallets() == ["0xsteady"]
+
+    def test_non_weather_dispersion_gate_rejects_generalist(self):
+        settings = _discovery_settings(
+            max_non_weather_markets=1, min_weather_share=0.0
+        )
+        disc = WalletDiscovery(settings=settings)
+        now = time.time()
+        disc.observe(
+            [
+                _activity_event("0xg", 300.0, now - 4 * 60),
+                _activity_event("0xg", 300.0, now - 3 * 60),
+                _activity_event("0xg", 300.0, now - 2 * 60),
+                _activity_event("0xg", 300.0, now - 60, slug="us-presidential-election-2024"),
+                _activity_event("0xg", 300.0, now, slug="btc-will-close-above-100k"),
+            ]
+        )
+        assert disc.promoted_wallets() == []
+
+    def test_non_weather_dispersion_gate_passes_when_specialized(self):
+        settings = _discovery_settings(
+            max_non_weather_markets=1, min_weather_share=0.0
+        )
+        disc = WalletDiscovery(settings=settings)
+        now = time.time()
+        disc.observe(
+            [
+                _activity_event("0xs", 300.0, now - 2 * 60),
+                _activity_event("0xs", 300.0, now - 60, slug="us-presidential-election-2024"),
+                _activity_event("0xs", 300.0, now, slug="us-presidential-election-2024"),
+            ]
+        )
+        assert disc.promoted_wallets() == ["0xs"]
+
+    def test_min_weather_share_default_rejects_generalist(self):
+        # The default min_weather_share is 0.8: a wallet that is only 50% weather
+        # must be rejected even though it clears the other activity gates.
+        settings = _discovery_settings(min_candidate_trades=2)
+        disc = WalletDiscovery(settings=settings)
+        now = time.time()
+        disc.observe(
+            [
+                _activity_event("0xmixed", 300.0, now - 3 * 60),
+                _activity_event("0xmixed", 300.0, now - 2 * 60, slug="us-presidential-election-2024"),
+            ]
+        )
+        assert disc.promoted_wallets() == []
 
     def test_static_and_demo_wallets_never_promoted(self):
         settings = _discovery_settings(target_wallets=["0xStatic"])

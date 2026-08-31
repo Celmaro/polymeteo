@@ -63,11 +63,19 @@ class Settings(BaseSettings):
     discovery_interval_s: float = 30.0
     discovery_max_markets: int = 5
     discovery_trades_per_market: int = 50
-    # Caps how many discovered wallets join the polling rotation; set to a
-    # larger integer via MAX_DISCOVERED_TARGETS if more coverage is wanted.
-    max_discovered_targets: int | None = 10
+    # The discovered-wallet rotation is intentionally uncapped: ``max_registry_size``
+    # bounds how many wallets the registry tracks and ``candidate_ttl_hours`` evicts
+    # stale ones, so promotion cannot grow without bound. A per-call cap can still be
+    # applied via ``WalletDiscovery.promoted_wallets(max_targets=...)``.
     min_candidate_trades: int = 3
     min_candidate_volume_usd: float = 100.0
+    # Spam / HFT guard: reject any candidate whose busiest UTC day exceeded this
+    # many trades. 0 disables the rule (default).
+    max_candidate_trades_per_day: int = 0
+    # Specialization guard: reject any candidate that touched more than this many
+    # distinct NON-weather markets within its observation window — a proxy for the
+    # generalist "dispersion" profile. 0 disables the rule (default).
+    max_non_weather_markets: int = 0
 
     # Demo mode is the ONLY situation where the client returns fabricated
     # stub markets / demo trade events. Defaults to False so production never
@@ -91,8 +99,10 @@ class Settings(BaseSettings):
     candidate_ttl_hours: float = 72.0
 
     # Minimum fraction of a wallet's observed trades that must be on weather
-    # markets before it can be promoted as a copy target.
-    min_weather_share: float = 0.5
+    # markets before it can be promoted as a copy target. The "specialist" bar
+    # (>=80%) is intentional: discovery targets scientists/meteorologists, not
+    # generalists who mix crypto, politics and sports into one wallet.
+    min_weather_share: float = 0.8
 
     # Consensus quorum: when N distinct target wallets take the same token/side
     # within the window, one copy fires at the size-weighted average price.

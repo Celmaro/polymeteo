@@ -102,12 +102,22 @@ class DiscoveredWallet:
     volume_usd: float = 0.0
     markets: set[str] = field(default_factory=set)
     weather_trades: int = 0
+    # UTC date (YYYY-MM-DD) -> trade count, used for the per-day spam/HFT gate.
+    trades_by_day: dict[str, int] = field(default_factory=dict)
+    # Distinct markets observed that were NOT weather; used for the generalist
+    # "dispersion" guard that keeps crypto/politics/sports wallets out.
+    non_weather_markets: set[str] = field(default_factory=set)
 
     @property
     def weather_share(self) -> float:
         if self.trades_seen <= 0:
             return 0.0
         return self.weather_trades / self.trades_seen
+
+    @property
+    def max_trades_per_day(self) -> int:
+        """Highest single-UTC-day trade count observed."""
+        return max(self.trades_by_day.values(), default=0)
 
     def observe(
         self,
@@ -123,6 +133,15 @@ class DiscoveredWallet:
         self.markets.add(market_slug)
         if is_weather:
             self.weather_trades += 1
+        else:
+            self.non_weather_markets.add(market_slug)
+        day_key = (
+            datetime.fromtimestamp(timestamp, tz=timezone.utc).strftime("%Y-%m-%d")
+            if timestamp
+            else None
+        )
+        if day_key:
+            self.trades_by_day[day_key] = self.trades_by_day.get(day_key, 0) + 1
 
 
 class WalletDiscovery:
@@ -189,6 +208,8 @@ class WalletDiscovery:
     def candidates(self) -> list[DiscoveredWallet]:
         """Wallets meeting every promotion gate, highest conviction first."""
         ttl_cutoff = time.time() - self.settings.candidate_ttl_hours * 3600.0
+        max_trades_day = self.settings.max_candidate_trades_per_day
+        max_non_weather = self.settings.max_non_weather_markets
         qualified = [
             w
             for w in self._wallets.values()
@@ -196,6 +217,8 @@ class WalletDiscovery:
             and w.volume_usd >= self.settings.min_candidate_volume_usd
             and w.last_seen >= ttl_cutoff
             and w.weather_share >= self.settings.min_weather_share
+            and (max_trades_day <= 0 or w.max_trades_per_day <= max_trades_day)
+            and (max_non_weather <= 0 or len(w.non_weather_markets) <= max_non_weather)
         ]
         qualified.sort(key=lambda w: (w.volume_usd, w.trades_seen), reverse=True)
         return qualified
@@ -203,16 +226,15 @@ class WalletDiscovery:
     def promoted_wallets(self, max_targets: int | None = None) -> list[str]:
         """Addresses cleared for the polling rotation this instant.
 
-        With no explicit argument the settings cap applies; a settings cap of
-        None (the default) promotes every qualified candidate.
+        Promotion is uncapped by default; ``max_registry_size`` bounds the
+        registry and ``candidate_ttl_hours`` evicts stale wallets, so the
+        rotation cannot grow without bound. An explicit ``max_targets`` may be
+        passed to cap the result for a particular call site.
         """
-        limit = max_targets
-        if limit is None:
-            limit = self.settings.max_discovered_targets
         qualified = self.candidates()
-        if limit is None:
+        if max_targets is None:
             return [w.address for w in qualified]
-        return [w.address for w in qualified[:limit]]
+        return [w.address for w in qualified[:max_targets]]
 
     def status(self) -> dict[str, Any]:
         """Snapshot for the /api/discovery/status endpoint."""
