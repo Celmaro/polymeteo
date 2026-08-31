@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from threading import RLock
 
 from weather_copy_bot.models import Side, TradeSignal
 
@@ -103,6 +104,9 @@ class RiskEngine:
         limits: RiskLimits | None = None,
     ):
         self.limits = limits or RiskLimits()
+        # Guards ``_daily_loss``/``_peak_balance``/breaker state against races
+        # between the asyncio engine loop and FastAPI sync-executor callers.
+        self._state_lock = RLock()
         self._reset_state()
 
     def _reset_state(self) -> None:
@@ -117,19 +121,20 @@ class RiskEngine:
 
     def _check_day_reset(self) -> None:
         """Reset daily counters if new day."""
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        if today != self._day_key:
-            had_breaker = self._circuit_breaker_tripped
-            logger.info(f"Resetting daily counters for {today}")
-            self._daily_loss = 0.0
-            self._day_key = today
-            # day rollover also clears a tripped circuit breaker: a stall caused by
-            # yesterday's drawdown must never block a fresh day's trading.
-            if had_breaker:
-                logger.warning("Auto-resetting circuit breaker on day rollover")
-                self._circuit_breaker_tripped = False
-                self._circuit_breaker_reason = None
-                self._circuit_breaker_tripped_at = None
+        with self._state_lock:
+            today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            if today != self._day_key:
+                had_breaker = self._circuit_breaker_tripped
+                logger.info(f"Resetting daily counters for {today}")
+                self._daily_loss = 0.0
+                self._day_key = today
+                # day rollover also clears a tripped circuit breaker: a stall caused by
+                # yesterday's drawdown must never block a fresh day's trading.
+                if had_breaker:
+                    logger.warning("Auto-resetting circuit breaker on day rollover")
+                    self._circuit_breaker_tripped = False
+                    self._circuit_breaker_reason = None
+                    self._circuit_breaker_tripped_at = None
 
     def check_trade(
         self,
@@ -171,9 +176,10 @@ class RiskEngine:
             if self.limits.enable_circuit_breaker:
                 drawdown = self._calculate_drawdown(balance)
                 if drawdown >= self.limits.circuit_breaker_threshold:
-                    self._circuit_breaker_tripped = True
-                    self._circuit_breaker_reason = f"drawdown:{drawdown:.2%}"
-                    self._circuit_breaker_tripped_at = datetime.now(timezone.utc)
+                    with self._state_lock:
+                        self._circuit_breaker_tripped = True
+                        self._circuit_breaker_reason = f"drawdown:{drawdown:.2%}"
+                        self._circuit_breaker_tripped_at = datetime.now(timezone.utc)
                     return RiskCheck(
                         passed=False,
                         rejected=True,
@@ -265,9 +271,10 @@ class RiskEngine:
         if self.limits.enable_circuit_breaker:
             drawdown = self._calculate_drawdown(balance)
             if drawdown >= self.limits.circuit_breaker_threshold:
-                self._circuit_breaker_tripped = True
-                self._circuit_breaker_reason = f"drawdown:{drawdown:.2%}"
-                self._circuit_breaker_tripped_at = datetime.now(timezone.utc)
+                with self._state_lock:
+                    self._circuit_breaker_tripped = True
+                    self._circuit_breaker_reason = f"drawdown:{drawdown:.2%}"
+                    self._circuit_breaker_tripped_at = datetime.now(timezone.utc)
                 return RiskCheck(
                     passed=False,
                     rejected=True,
@@ -346,52 +353,58 @@ class RiskEngine:
 
     def _calculate_drawdown(self, current_balance: float) -> float:
         """Calculate current drawdown from peak."""
-        if self._peak_balance == 0:
-            self._peak_balance = current_balance
-            return 0.0
+        with self._state_lock:
+            if self._peak_balance == 0:
+                self._peak_balance = current_balance
+                return 0.0
 
-        if current_balance > self._peak_balance:
-            self._peak_balance = current_balance
-            return 0.0
+            if current_balance > self._peak_balance:
+                self._peak_balance = current_balance
+                return 0.0
 
-        return (self._peak_balance - current_balance) / self._peak_balance
+            return (self._peak_balance - current_balance) / self._peak_balance
 
     def update_positions(self, positions: list[Position]) -> None:
         """Update tracked open positions."""
-        self._open_positions = {p.market_slug: p for p in positions}
+        with self._state_lock:
+            self._open_positions = {p.market_slug: p for p in positions}
 
     def update_balance(self, balance: float, daily_pnl: float) -> None:
         """Update balance and daily P&L."""
-        self._check_day_reset()
-        self._daily_loss = daily_pnl
-        self._peak_balance = max(self._peak_balance or balance, balance)
+        with self._state_lock:
+            self._check_day_reset()
+            self._daily_loss = daily_pnl
+            self._peak_balance = max(self._peak_balance or balance, balance)
 
     def record_trade(self, pnl: float = 0.0) -> None:
         """Record a trade for daily counters."""
-        self._check_day_reset()
-        if pnl:
-            self._daily_loss += pnl
+        with self._state_lock:
+            self._check_day_reset()
+            if pnl:
+                self._daily_loss += pnl
 
     def reset_circuit_breaker(self) -> None:
         """Manually reset the circuit breaker."""
         logger.warning("Circuit breaker manually reset")
-        self._circuit_breaker_tripped = False
-        self._circuit_breaker_reason = None
-        self._circuit_breaker_tripped_at = None
+        with self._state_lock:
+            self._circuit_breaker_tripped = False
+            self._circuit_breaker_reason = None
+            self._circuit_breaker_tripped_at = None
 
     def get_state(self) -> dict:
         """Get current risk engine state."""
-        return {
-            "circuit_breaker_tripped": self._circuit_breaker_tripped,
-            "circuit_breaker_tripped_at": self._circuit_breaker_tripped_at.isoformat()
-            if self._circuit_breaker_tripped_at
-            else None,
-            "circuit_breaker_reason": self._circuit_breaker_reason,
-            "daily_pnl": self._daily_loss,
-            "peak_balance": self._peak_balance,
-            "open_positions": len(self._open_positions),
-            "drawdown": self._calculate_drawdown(0),  # Requires balance to be set
-        }
+        with self._state_lock:
+            return {
+                "circuit_breaker_tripped": self._circuit_breaker_tripped,
+                "circuit_breaker_tripped_at": self._circuit_breaker_tripped_at.isoformat()
+                if self._circuit_breaker_tripped_at
+                else None,
+                "circuit_breaker_reason": self._circuit_breaker_reason,
+                "daily_pnl": self._daily_loss,
+                "peak_balance": self._peak_balance,
+                "open_positions": len(self._open_positions),
+                "drawdown": self._calculate_drawdown(0),  # Requires balance to be set
+            }
 
 
 class LiquidityChecker:

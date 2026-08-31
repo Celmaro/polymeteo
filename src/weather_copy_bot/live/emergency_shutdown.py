@@ -11,6 +11,7 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from enum import Enum
+from threading import RLock
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -118,6 +119,9 @@ class EmergencyShutdown:
 
         # Locks
         self._shutdown_lock = asyncio.Lock()
+        # Guards ``_daily_loss``/``_peak_balance`` against races between the
+        # async check loop and the sync reset path (and any sync stats read).
+        self._pnl_lock = RLock()
 
         logger.info(
             f"[SHUTDOWN] Emergency shutdown initialized: "
@@ -223,16 +227,17 @@ class EmergencyShutdown:
                     else f"failed closes: {failure_summary}"
                 )
 
-            event = ShutdownEvent(
-                reason=reason,
-                timestamp=time.time(),
-                details=full_details,
-                positions_closed=positions_closed,
-                pending_orders_cancelled=pending_cancelled,
-                balance_at_shutdown=balance,
-                pnl_at_shutdown=self._daily_loss,
-            )
-            self._shutdown_log.append(event)
+            with self._pnl_lock:
+                event = ShutdownEvent(
+                    reason=reason,
+                    timestamp=time.time(),
+                    details=full_details,
+                    positions_closed=positions_closed,
+                    pending_orders_cancelled=pending_cancelled,
+                    balance_at_shutdown=balance,
+                    pnl_at_shutdown=self._daily_loss,
+                )
+                self._shutdown_log.append(event)
 
             # Step 4: Set final state
             self._state = SystemState.SHUTDOWN
@@ -268,17 +273,18 @@ class EmergencyShutdown:
             return ShutdownReason.DAILY_LOSS_LIMIT
 
         # Update peak balance
-        if current_balance > self._peak_balance:
-            self._peak_balance = current_balance
+        with self._pnl_lock:
+            if current_balance > self._peak_balance:
+                self._peak_balance = current_balance
 
-        # Check drawdown
-        if self._peak_balance > 0:
-            drawdown = (self._peak_balance - current_balance) / self._peak_balance
-            if drawdown >= self.max_drawdown:
-                return ShutdownReason.DRAWING_LIMIT
+            # Check drawdown
+            if self._peak_balance > 0:
+                drawdown = (self._peak_balance - current_balance) / self._peak_balance
+                if drawdown >= self.max_drawdown:
+                    return ShutdownReason.DRAWING_LIMIT
 
-        # Update daily loss tracking
-        self._daily_loss = current_pnl
+            # Update daily loss tracking
+            self._daily_loss = current_pnl
 
         return None
 
@@ -349,21 +355,24 @@ class EmergencyShutdown:
 
     def get_stats(self) -> dict[str, Any]:
         """Get shutdown system statistics."""
-        return {
-            "state": self._state.value,
-            "total_shutdowns": len(self._shutdown_log),
-            "daily_pnl": self._daily_loss,
-            "peak_balance": self._peak_balance,
-            "circuit_breaker": {
-                "tripped": self._circuit_breaker.is_tripped,
-                "consecutive_failures": self._circuit_breaker.consecutive_failures,
-                "trip_reason": self._circuit_breaker.trip_reason,
-            },
-        }
+        with self._pnl_lock:
+            stats = {
+                "state": self._state.value,
+                "total_shutdowns": len(self._shutdown_log),
+                "daily_pnl": self._daily_loss,
+                "peak_balance": self._peak_balance,
+                "circuit_breaker": {
+                    "tripped": self._circuit_breaker.is_tripped,
+                    "consecutive_failures": self._circuit_breaker.consecutive_failures,
+                    "trip_reason": self._circuit_breaker.trip_reason,
+                },
+            }
+        return stats
 
     def reset_daily_tracking(self) -> None:
         """Reset daily P&L tracking (call at start of trading day)."""
-        self._daily_loss = 0.0
+        with self._pnl_lock:
+            self._daily_loss = 0.0
         logger.info("[SHUTDOWN] Daily tracking reset")
 
 
