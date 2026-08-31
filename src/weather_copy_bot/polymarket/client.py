@@ -25,6 +25,7 @@ from typing import Any
 import httpx
 import numpy as np
 from polymarket_apis import PolymarketDataClient, PolymarketGammaClient
+from polymarket_apis.types.data_types import ClosedPosition
 
 from weather_copy_bot.config import Settings, get_settings
 from weather_copy_bot.polymarket.rate_limiter import (
@@ -122,10 +123,66 @@ class PolymarketClient:
                 )
             raise
 
+    # The /closed-positions endpoint caps each page at 50 rows (``offset`` is
+    # honoured, so paginate to recover the full history instead of the first
+    # page only). ``max_positions`` guards against unbounded pagination.
+    _closed_positions_limit: int = 50
+    _closed_positions_max: int = 500
+
     async def fetch_closed_positions(self, wallet: str) -> list[dict[str, Any]]:
-        """Closed-position realized P&L rows for ``wallet`` (snake_case dicts)."""
-        result = await self._data_call(self._data.get_closed_positions, user=wallet)
-        return [p.model_dump() for p in (result or [])]
+        """Closed-position realized P&L rows for ``wallet`` (snake_case dicts).
+
+        The library's ``get_closed_positions`` does not surface ``limit`` /
+        ``offset`` and returns only the first page (10 rows by default). We
+        query the raw ``/closed-positions`` endpoint through the same httpx
+        client and rate-limit budget so the profiler sees the full realized-P&L
+        history rather than a single capped page. Results are capped at
+        ``_closed_positions_max`` rows as a safety valve.
+        """
+        page_size = self._closed_positions_limit
+        limit = self._closed_positions_max
+        rows: list[dict[str, Any]] = []
+        offset = 0
+        while len(rows) < limit:
+            page = await self._data_call(
+                self._closed_positions_page,
+                user=wallet,
+                page_size=page_size,
+                offset=offset,
+            )
+            page_rows = list(page or [])
+            if not page_rows:
+                break
+            rows.extend(page_rows)
+            if len(page_rows) < page_size:
+                break
+            offset += page_size
+        return rows[:limit]
+
+    def _closed_positions_page(
+        self,
+        user: str,
+        page_size: int,
+        offset: int,
+    ) -> list[dict[str, Any]]:
+        """One page of ``/closed-positions``, normalized to snake_case dicts.
+
+        The ``/closed-positions`` endpoint returns camelCase JSON, whereas the
+        profiler chain expects the snake_case shape that
+        :meth:`get_closed_positions` yields via ``model_dump()``. We rebuild the
+        library's ``ClosedPosition`` model (which also coerces the unix-epoch
+        ``timestamp`` to a datetime) so downstream consumers keep working
+        unchanged. Runs in a worker thread.
+        """
+        response = self._data.client.get(
+            self._data._build_url("/closed-positions"),
+            params={"user": user, "limit": page_size, "offset": offset},
+        )
+        response.raise_for_status()
+        return [
+            pos.model_dump()
+            for pos in (ClosedPosition(**row) for row in response.json())
+        ]
 
     async def fetch_pnl_timeseries(
         self,

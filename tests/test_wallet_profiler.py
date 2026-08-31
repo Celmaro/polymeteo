@@ -107,7 +107,7 @@ class TestWalletProfilerMetrics:
         assert profile.age_days >= 89.0
         assert profile.data_available is True
 
-    async def test_enriches_variance_rank_profit_and_value(self):
+    async def test_enriches_cv_rank_profit_and_value(self):
         client = _FakeClient(
             closed=[_closed_position(5.0, 50.0)],
             pnl=[{"value": 1.0, "timestamp": "2026-08-01T00:00:00Z"},
@@ -118,7 +118,8 @@ class TestWalletProfilerMetrics:
         )
         profiler = WalletProfiler(settings=_profiler_settings(), client=client)
         profile = await profiler.profile_wallet("0xabc")
-        assert profile.weekly_variance == 1.0
+        # CV of [1.0, 3.0] = std/mean*100 = 1.0/2.0*100 = 50.
+        assert profile.weekly_cv == 50.0
         assert profile.weather_rank == 7
         assert profile.overall_profit == 123.0
         assert profile.position_value == 456.0
@@ -235,7 +236,7 @@ class TestWalletDiscoveryProfileGates:
             min_candidate_volume_usd=100.0,
             profiler_min_roi_pct=0.0,
             profiler_min_win_rate=0.0,
-            profiler_max_weekly_variance=0.0,
+            profiler_max_weekly_cv=0.0,
         )
         disc = WalletDiscovery(settings=settings, client=client)
         disc.observe(self._events("0xwallet", n=3, size=300.0))

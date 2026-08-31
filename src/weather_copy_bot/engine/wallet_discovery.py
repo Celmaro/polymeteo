@@ -260,10 +260,10 @@ class WalletDiscovery:
         wallet: DiscoveredWallet,
         min_roi_pct: float,
         min_win_rate: float,
-        max_weekly_variance: float,
+        max_weekly_cv: float,
     ) -> bool:
         """Profiler gate: only evaluated when at least one gate is armed."""
-        if min_roi_pct <= 0 and min_win_rate <= 0 and max_weekly_variance <= 0:
+        if min_roi_pct <= 0 and min_win_rate <= 0 and max_weekly_cv <= 0:
             return True
         profile = wallet.profile
         if profile is None or not profile.data_available:
@@ -274,7 +274,7 @@ class WalletDiscovery:
             return False
         if min_win_rate > 0 and profile.win_rate < min_win_rate:
             return False
-        return max_weekly_variance <= 0 or profile.weekly_variance <= max_weekly_variance
+        return max_weekly_cv <= 0 or profile.weekly_cv <= max_weekly_cv
 
     def candidates(self) -> list[DiscoveredWallet]:
         """Wallets meeting every promotion gate, highest conviction first.
@@ -290,7 +290,7 @@ class WalletDiscovery:
                 w,
                 self.settings.profiler_min_roi_pct,
                 self.settings.profiler_min_win_rate,
-                self.settings.profiler_max_weekly_variance,
+                self.settings.profiler_max_weekly_cv,
             )
         ]
 
@@ -322,7 +322,7 @@ class WalletDiscovery:
                     "realized_pnl": round(w.profile.realized_pnl, 2),
                     "win_rate": round(w.profile.win_rate, 4),
                     "roi_pct": round(w.profile.roi_pct, 2),
-                    "weekly_variance": round(w.profile.weekly_variance, 2),
+                    "weekly_cv": round(w.profile.weekly_cv, 2),
                     "age_days": round(w.profile.age_days, 1),
                     "weather_rank": w.profile.weather_rank,
                 }

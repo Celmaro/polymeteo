@@ -45,7 +45,7 @@ class WalletProfile:
     win_rate: float = 0.0
     invested: float = 0.0
     roi_pct: float = 0.0
-    weekly_variance: float = 0.0
+    weekly_cv: float = 0.0
     age_days: float = 0.0
     weather_rank: int | None = None
     overall_profit: float = 0.0
@@ -109,7 +109,7 @@ class WalletProfiler:
 
         try:
             points = await self.client.fetch_pnl_timeseries(address)
-            profile.weekly_variance = self._variance(
+            profile.weekly_cv = self._coefficient_of_variation(
                 [p.get("value") for p in points if p.get("value") is not None]
             )
         except Exception as exc:
@@ -189,9 +189,20 @@ class WalletProfiler:
             return None
 
     @staticmethod
-    def _variance(values: list[float]) -> float:
+    def _coefficient_of_variation(values: list[float]) -> float:
+        """Relative dispersion of the P&L timeseries, ``std / mean * 100``.
+
+        The raw P&L variance scales with position size (a $² figure that is
+        unusable as a fixed threshold). Expressing dispersion as a percentage
+        of the mean makes the profiler gate meaningful across wallets of any
+        size. A zero (or near-zero) mean has no meaningful relative dispersion,
+        so 0 is returned instead of a degenerate infinite value.
+        """
         vals = [float(v) for v in values]
         if len(vals) < 2:
             return 0.0
         mean = sum(vals) / len(vals)
-        return sum((v - mean) ** 2 for v in vals) / len(vals)
+        if mean == 0.0:
+            return 0.0
+        std = (sum((v - mean) ** 2 for v in vals) / len(vals)) ** 0.5
+        return std / abs(mean) * 100.0
