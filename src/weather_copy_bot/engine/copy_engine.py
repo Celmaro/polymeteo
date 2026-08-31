@@ -892,13 +892,13 @@ class CopyEngine:
         risk_state = self.risk.get_state() if self.risk is not None else {}
         breaker = risk_state.get("circuit_breaker_tripped", False)
         breaker_reason = risk_state.get("circuit_breaker_reason") or "-"
-        daily_loss = float(risk_state.get("daily_pnl", 0.0) or 0.0)
+        daily_pnl = float(risk_state.get("daily_pnl", 0.0) or 0.0)
         logger.info(
             "STATS mode=%s detected=%s copied=%s skipped=%s risk_rejected=%s "
             "quorum_votes=%s reached=%s rejected=%s live_filled=%s live_failed=%s "
             "live_dup=%s live_throttled=%s targets=%s balance=$%.2f upstream_429=%s "
             "upstream_429_5m=%s latency_p50=%s latency_p99=%s age_p50=%s age_p99=%s "
-            "breaker=%s breaker_reason=%s daily_loss=$%.2f reasons={%s}",
+            "breaker=%s breaker_reason=%s daily_pnl=$%.2f reasons={%s}",
             "paper" if s["dry_run"] else "live",
             s["signals_detected"],
             s["copied"],
@@ -921,7 +921,7 @@ class CopyEngine:
             s["upstream_age_p99_ms"] if s["upstream_age_p99_ms"] is not None else "-",
             breaker,
             breaker_reason,
-            daily_loss,
+            daily_pnl,
             reasons,
         )
 
