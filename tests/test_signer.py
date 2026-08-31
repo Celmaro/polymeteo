@@ -1,6 +1,7 @@
 """Tests for EIP-712 signer."""
 
 import json
+import logging
 import time
 
 import httpx
@@ -8,6 +9,7 @@ import pytest
 
 from weather_copy_bot.live.signer import (
     CLOBExecutor,
+    CollateralManager,
     EIP712Signer,
     Order,
     SignedOrder,
@@ -278,3 +280,69 @@ class TestCollateralManager:
         )
         with pytest.raises(RuntimeError):
             await manager.unwrap_pusdc(1000)
+
+
+class TestSEC01KeyRedaction:
+    """SEC-01: private keys must never appear in repr or log output."""
+
+    def _sample_key(self) -> str:
+        return "0x" + "ab" * 32  # 64 hex chars after the 0x prefix
+
+    def test_signer_repr_redacts_private_key(self):
+        signer = EIP712Signer(
+            private_key=self._sample_key(),
+            account_address="0x1234567890123456789012345678901234567890",
+        )
+        rendered = repr(signer)
+        assert self._sample_key() not in rendered
+        assert "redacted" in rendered.lower() or "…" in rendered
+        # Address must still be visible so logs are debuggable.
+        assert "0x1234567890123456789012345678901234567890" in rendered
+
+    def test_collateral_manager_repr_redacts_private_key(self):
+        manager = CollateralManager(
+            private_key=self._sample_key(),
+            rpc_url="http://127.0.0.1:8545",
+        )
+        rendered = repr(manager)
+        assert self._sample_key() not in rendered
+        assert "redacted" in rendered.lower() or "…" in rendered
+        assert "http://127.0.0.1:8545" in rendered
+
+    def test_signer_str_also_redacts(self):
+        signer = EIP712Signer(
+            private_key=self._sample_key(),
+            account_address="0x1234567890123456789012345678901234567890",
+        )
+        # Some loggers call str(obj) rather than repr(obj).
+        assert self._sample_key() not in str(signer)
+
+    def test_logging_filter_scrubs_interpolated_key(self, caplog):
+        secret = self._sample_key()
+        with caplog.at_level(logging.INFO, logger="weather_copy_bot.live.signer"):
+            logger_local = logging.getLogger("weather_copy_bot.live.signer")
+            logger_local.info("loaded signer with key=%s", secret)
+        assert secret not in caplog.text
+        assert "<redacted-key>" in caplog.text
+
+    def test_logging_filter_scrubs_key_in_format_string(self, caplog):
+        secret = self._sample_key()
+        with caplog.at_level(logging.INFO, logger="weather_copy_bot.live.signer"):
+            logger_local = logging.getLogger("weather_copy_bot.live.signer")
+            # Hard-coded key inside the format string itself.
+            logger_local.info(f"static message with {secret} inline")
+        assert secret not in caplog.text
+        assert "<redacted-key>" in caplog.text
+
+    def test_logging_filter_passes_clean_logs_through(self, caplog):
+        with caplog.at_level(logging.INFO, logger="weather_copy_bot.live.signer"):
+            logger_local = logging.getLogger("weather_copy_bot.live.signer")
+            logger_local.info("harmless message nonce=%d", 42)
+        assert "harmless message nonce=42" in caplog.text
+        assert "<redacted-key>" not in caplog.text
+
+    def test_logging_filter_handles_non_string_args(self, caplog):
+        with caplog.at_level(logging.INFO, logger="weather_copy_bot.live.signer"):
+            logger_local = logging.getLogger("weather_copy_bot.live.signer")
+            logger_local.info("counts=%s %s", 42, [1, 2, 3])
+        assert "counts=42 [1, 2, 3]" in caplog.text

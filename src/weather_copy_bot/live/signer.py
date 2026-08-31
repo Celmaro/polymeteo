@@ -4,11 +4,101 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from dataclasses import dataclass
 
 import httpx
 
 logger = logging.getLogger(__name__)
+
+# --- SEC-01: private-key redaction ------------------------------------------
+#
+# Defense-in-depth: any object that holds a private key MUST avoid leaking it
+# via repr/str (forensic dumps, Sentry breadcrumbs, exception chains) and any
+# log record that happens to embed the key as a string MUST have it scrubbed
+# before reaching a handler. The two layers below cover both surfaces.
+_KEY_REDACT_RE = re.compile(r"0x[0-9a-fA-F]{64}")
+_KEY_REDACTED = "<redacted-key>"
+_FILTER_INSTALLED = False
+
+
+class _KeyRedactionFilter(logging.Filter):
+    """Scrub 64-char hex private keys out of log records.
+
+    The pattern matches ``0x`` followed by 64 hex chars, which is the canonical
+    EVM private-key length (32 bytes). Both the message format string and any
+    string-typed args are sanitized, so logs stay structured while the secret
+    is suppressed wherever it was interpolated.
+
+    Note on Python logging internals: filters attached to a *parent* logger
+    are NOT consulted during record propagation, so the safe attachment
+    point is on every Handler (which is what ``emit`` runs through) and on
+    each originating logger. ``_install_key_redaction_filter`` handles both.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            msg = record.getMessage()
+            if not _KEY_REDACT_RE.search(msg):
+                return True
+            # Scrub the format string itself, in case a key was hard-coded.
+            record.msg = _KEY_REDACT_RE.sub(_KEY_REDACTED, str(record.msg))
+            # Scrub any string args so substituted values are also clean.
+            if record.args:
+                scrubbed_args = tuple(
+                    _KEY_REDACT_RE.sub(_KEY_REDACTED, a)
+                    if isinstance(a, str)
+                    else a
+                    for a in record.args
+                )
+                record.args = scrubbed_args
+        except Exception:
+            # Never let the redaction filter itself break logging.
+            pass
+        return True
+
+
+def _attach_filter(target: logging.Logger | logging.Handler) -> bool:
+    """Attach the redaction filter to ``target`` if not already present."""
+    for existing in target.filters:
+        if isinstance(existing, _KeyRedactionFilter):
+            return False
+    target.addFilter(_KeyRedactionFilter())
+    return True
+
+
+def install_key_redaction_filter() -> None:
+    """Install the redaction filter on the root logger, every existing
+    logger, and every existing handler. Idempotent.
+
+    Re-run this after adding new handlers or loggers if you want them to
+    pick up redaction too.
+    """
+    root = logging.getLogger()
+    _attach_filter(root)
+    for logger_name in list(root.manager.loggerDict.keys()):
+        try:
+            existing = root.manager.getLogger(logger_name)
+        except Exception:
+            continue
+        _attach_filter(existing)
+        for handler in list(existing.handlers):
+            _attach_filter(handler)
+    # Also walk handlers on the root itself.
+    for handler in list(root.handlers):
+        _attach_filter(handler)
+
+
+def _install_key_redaction_filter() -> None:
+    """Idempotent module-import-time install."""
+    global _FILTER_INSTALLED
+    if _FILTER_INSTALLED:
+        return
+    install_key_redaction_filter()
+    _FILTER_INSTALLED = True
+
+
+_install_key_redaction_filter()
 
 # CLOB V2 Domain separator (Polygon mainnet).
 #
@@ -160,6 +250,20 @@ class EIP712Signer:
     def address(self) -> str:
         """Get signer address."""
         return self._address
+
+    def __repr__(self) -> str:
+        # SEC-01: never leak the raw private key in repr/str. Show a
+        # short fingerprint of the key (first/last 4 hex chars) so logs
+        # remain debuggable while the secret itself stays opaque.
+        pk = getattr(self, "private_key", "") or ""
+        if isinstance(pk, str) and len(pk) >= 10:
+            fingerprint = f"{pk[:6]}…{pk[-4:]}"
+        else:
+            fingerprint = "<redacted-key>"
+        return (
+            f"EIP712Signer(address={self._address!r}, "
+            f"private_key={fingerprint!r})"
+        )
 
     def sign_order(self, order: Order) -> SignedOrder:
         """
@@ -463,6 +567,18 @@ class CollateralManager:
         self.private_key = private_key
         self.rpc_url = rpc_url
         self._w3 = None
+
+    def __repr__(self) -> str:
+        # SEC-01: never leak the raw private key in repr/str.
+        pk = getattr(self, "private_key", "") or ""
+        if isinstance(pk, str) and len(pk) >= 10:
+            fingerprint = f"{pk[:6]}…{pk[-4:]}"
+        else:
+            fingerprint = "<redacted-key>"
+        return (
+            f"CollateralManager(rpc_url={self.rpc_url!r}, "
+            f"private_key={fingerprint!r})"
+        )
 
     def _init_web3(self):
         """Initialize web3."""
